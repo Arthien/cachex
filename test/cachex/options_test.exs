@@ -1,17 +1,55 @@
 defmodule Cachex.OptionsTest do
   use CachexCase
 
+  # Bind any required hooks for test execution
+  setup_all do
+    ForwardHook.bind([
+      options_pre_forward_hook: [ type: :pre ],
+      options_post_forward_hook: [ type: :post ]
+    ])
+    :ok
+  end
+
   # Options parsing should add the cache name to the returned state, so this test
   # will just ensure that this is done correctly.
   test "adding a cache name to the state" do
     # grab a cache name
     name = Helper.create_name()
 
-    # parse the options
-    { :ok, state } = Cachex.Options.parse(name, [])
+    # parse the options into a validated cache state
+    assert match?({ :ok, cache(name: ^name) }, Cachex.Options.parse(name, []))
+  end
 
-    # assert the name is added
-    assert(state.cache == name)
+  # This test ensures the integrity of the basic option parser provided for use
+  # when parsing cache options. We need to test the ability to retrieve a value
+  # based on a condition, but also returning default values in case of condition
+  # failure or error.
+  test "getting options from a Keyword List" do
+    # our base option set
+    options = [ positive: 10, negative: -10 ]
+
+    # our base condition
+    condition = &(is_number(&1) and &1 > 0)
+
+    # parse out using a true condition
+    result1 = Cachex.Options.get(options, :positive, condition)
+
+    # parse out using a false condition (should return a default)
+    result2 = Cachex.Options.get(options, :negative, condition)
+
+    # parse out using an error condition (should return a custom default)
+    result3 = Cachex.Options.get(options, :negative, fn(_) ->
+      raise ArgumentError
+    end, 0)
+
+    # condition true means we return the value
+    assert(result1 == 10)
+
+    # condition false and no default means we return nil
+    assert(result2 == nil)
+
+    # condition false with a default returns the default
+    assert(result3 == 0)
   end
 
   # This test makes sure that we can correctly parse out commands which are to
@@ -30,8 +68,12 @@ defmodule Cachex.OptionsTest do
 
     # define valid command lists
     v_cmds1 = [ commands: [ ] ]
-    v_cmds2 = [ commands: [ lpop: { :return, fun1 } ] ]
-    v_cmds3 = [ commands: [ lpop: { :return, fun1 }, lpop: { :modify, fun2 } ] ]
+    v_cmds2 = [ commands:  [ lpop: command(type: :read, execute: fun1) ] ]
+    v_cmds3 = [ commands: %{ lpop: command(type: :read, execute: fun1) } ]
+    v_cmds4 = [ commands: [
+      lpop: command(type:  :read, execute: fun1),
+      lpop: command(type: :write, execute: fun2)
+    ] ]
 
     # define invalid command lists
     i_cmds1 = [ commands: [ 1 ] ]
@@ -39,72 +81,81 @@ defmodule Cachex.OptionsTest do
     i_cmds3 = [ commands: [ lpop: 1 ] ]
 
     # attempt to validate
-    { :ok, results1 } = Cachex.Options.parse(name, v_cmds1)
-    { :ok, results2 } = Cachex.Options.parse(name, v_cmds2)
-    { :ok, results3 } = Cachex.Options.parse(name, v_cmds3)
+    { :ok, cache(commands: commands1) } = Cachex.Options.parse(name, v_cmds1)
+    { :ok, cache(commands: commands2) } = Cachex.Options.parse(name, v_cmds2)
+    { :ok, cache(commands: commands3) } = Cachex.Options.parse(name, v_cmds3)
+    { :ok, cache(commands: commands4) } = Cachex.Options.parse(name, v_cmds4)
 
     # the first two should be parsed into maps
-    assert(results1.commands == %{ })
-    assert(results2.commands == %{ lpop: { :return, fun1 } })
+    assert(commands1 == %{ })
+    assert(commands2 == %{ lpop: command(type: :read, execute: fun1) })
+    assert(commands3 == %{ lpop: command(type: :read, execute: fun1) })
 
-    # the third should keep only the first implementation
-    assert(results3.commands == %{ lpop: { :return, fun1 } })
+    # the fourth should keep only the first implementation
+    assert(commands4 == %{ lpop: command(type: :read, execute: fun1) })
 
-    # parse the fourth and fifth
-    { :ok, results4 } = Cachex.Options.parse(name, i_cmds1)
-    { :ok, results5 } = Cachex.Options.parse(name, i_cmds2)
-
-    # the fourth and fifth default to empty
-    assert(results4.commands == %{ })
-    assert(results5.commands == %{ })
-
-    # parse the invalid list
-    results6 = Cachex.Options.parse(name, i_cmds3)
+    # parse the invalid lists
+    { :error,  msg } = Cachex.Options.parse(name, i_cmds1)
+    { :error, ^msg } = Cachex.Options.parse(name, i_cmds2)
+    { :error, ^msg } = Cachex.Options.parse(name, i_cmds3)
 
     # should return an error
-    assert(results6 == { :error, :invalid_command })
+    assert(msg == :invalid_command)
   end
 
-  # This test ensures that custom ETS options can be passed through to the ETS
-  # table. We need to check that if the value is not a list, we use defaults. We
-  # also verify that read/write concurrency is true unless explicitly disabled.
-  test "parsing :ets_opts flags" do
+  # This test will verify the parsing of compression flags to determine whether
+  # a cache has them enabled or disabled. This is simply checking whether the flag
+  # is set to true or false, and the default.
+  test "parsing :compressed flags" do
     # grab a cache name
     name = Helper.create_name()
 
-    # define the defaults
-    defaults = [
-      read_concurrency: true,
-      write_concurrency: true
-    ]
+    # parse our values as options
+    { :ok, cache(compressed: comp1) } = Cachex.Options.parse(name, [ compressed:  true ])
+    { :ok, cache(compressed: comp2) } = Cachex.Options.parse(name, [ compressed: false ])
+    { :ok, cache(compressed: comp3) } = Cachex.Options.parse(name, [ ])
 
-    # parse out valid options
-    { :ok, state1 } = Cachex.Options.parse(name, [ ets_opts: [ :compressed ] ])
+    # the first one should be truthy, and the latter two falsey
+    assert comp1
+    refute comp2
+    refute comp3
+  end
 
-    # parse out invalid options
-    { :ok, state2 } = Cachex.Options.parse(name, [ ets_opts: "[:compressed]" ])
-    { :ok, state3 } = Cachex.Options.parse(name, [ ])
+  # This test verifies the parsing of TTL related flags. We have to test various
+  # combinations of :ttl_interval and :default_ttl to verify each state correctly.
+  test "parsing :expiration flags" do
+    # grab a cache name
+    name = Helper.create_name()
 
-    # parse out overridden options
-    { :ok, state4 } = Cachex.Options.parse(name, [
-      ets_opts: [
-        read_concurrency: false,
-        write_concurrency: false
-      ]
-    ])
+    # parse out valid combinations
+    { :ok, cache(expiration: exp1) } = Cachex.Options.parse(name, [ expiration: expiration(default: 1) ])
+    { :ok, cache(expiration: exp2) } = Cachex.Options.parse(name, [ expiration: expiration(default: nil) ])
+    { :ok, cache(expiration: exp3) } = Cachex.Options.parse(name, [ expiration: expiration(interval: 1) ])
+    { :ok, cache(expiration: exp4) } = Cachex.Options.parse(name, [ expiration: expiration(interval: nil) ])
+    { :ok, cache(expiration: exp5) } = Cachex.Options.parse(name, [ expiration: expiration(lazy: true) ])
+    { :ok, cache(expiration: exp6) } = Cachex.Options.parse(name, [ expiration: expiration(lazy: false) ])
+    { :ok, cache(expiration: exp7) } = Cachex.Options.parse(name, [ ])
 
-    # the first options are completely valid
-    assert(state1.ets_opts == defaults ++ [ :compressed ])
+    # verify all valid states parse correctly
+    assert exp1 == expiration(default:   1, interval: 3000, lazy: true)
+    assert exp2 == expiration(default: nil, interval: 3000, lazy: true)
+    assert exp3 == expiration(default: nil, interval:    1, lazy: true)
+    assert exp4 == expiration(default: nil, interval:  nil, lazy: true)
+    assert exp5 == expiration(default: nil, interval: 3000, lazy: true)
+    assert exp6 == expiration(default: nil, interval: 3000, lazy: false)
+    assert exp7 == expiration(default: nil, interval: 3000, lazy: true)
 
-    # both the second and third options use defaults
-    assert(state2.ets_opts == defaults)
-    assert(state3.ets_opts == defaults)
+    # parse out invalid combinations
+    { :error,  msg } = Cachex.Options.parse(name, [ expiration: expiration(default: -1) ])
+    { :error, ^msg } = Cachex.Options.parse(name, [ expiration: expiration(default: "1") ])
+    { :error, ^msg } = Cachex.Options.parse(name, [ expiration: expiration(interval: -1) ])
+    { :error, ^msg } = Cachex.Options.parse(name, [ expiration: expiration(interval: "1") ])
+    { :error, ^msg } = Cachex.Options.parse(name, [ expiration: expiration(lazy: nil) ])
+    { :error, ^msg } = Cachex.Options.parse(name, [ expiration: expiration(lazy: "1") ])
+    { :error, ^msg } = Cachex.Options.parse(name, [ expiration: "expiration" ])
 
-    # the fourth options overrides the concurrency options
-    assert(state4.ets_opts == [
-      read_concurrency: false,
-      write_concurrency: false
-    ])
+    # check the error message on the failed states
+    assert msg == :invalid_expiration
   end
 
   # Every cache can have a default fallback implementation which is used in case
@@ -115,83 +166,75 @@ defmodule Cachex.OptionsTest do
     name = Helper.create_name()
 
     # define our falbacks
-    fallback1 = []
-    fallback2 = [ action: &String.reverse/1 ]
-    fallback3 = [ action: &String.reverse/1, state: {} ]
-    fallback4 = [ state: {} ]
+    fallback1 = fallback()
+    fallback2 = fallback(default: &String.reverse/1)
+    fallback3 = fallback(default: &String.reverse/1, state: {})
+    fallback4 = fallback(state: {})
     fallback5 = &String.reverse/1
     fallback6 = { }
 
-    # parse both as options
-    { :ok, state1 } = Cachex.Options.parse(name, [ fallback: fallback1 ])
-    { :ok, state2 } = Cachex.Options.parse(name, [ fallback: fallback2 ])
-    { :ok, state3 } = Cachex.Options.parse(name, [ fallback: fallback3 ])
-    { :ok, state4 } = Cachex.Options.parse(name, [ fallback: fallback4 ])
-    { :ok, state5 } = Cachex.Options.parse(name, [ fallback: fallback5 ])
-    { :ok, state6 } = Cachex.Options.parse(name, [ fallback: fallback6 ])
+    # parse all the valid fallbacks into caches
+    { :ok, cache(fallback: fallback1) } = Cachex.Options.parse(name, [ fallback: fallback1 ])
+    { :ok, cache(fallback: fallback2) } = Cachex.Options.parse(name, [ fallback: fallback2 ])
+    { :ok, cache(fallback: fallback3) } = Cachex.Options.parse(name, [ fallback: fallback3 ])
+    { :ok, cache(fallback: fallback4) } = Cachex.Options.parse(name, [ fallback: fallback4 ])
+    { :ok, cache(fallback: fallback5) } = Cachex.Options.parse(name, [ fallback: fallback5 ])
+    { :error, msg } = Cachex.Options.parse(name, [ fallback: fallback6 ])
 
-    # the first and sixth should use defaults
-    assert(state1.fallback == %Cachex.Fallback{ })
-    assert(state6.fallback == %Cachex.Fallback{ })
+    # the first should use defaults
+    assert(fallback1 == fallback())
 
     # the second and fifth should have an action but no state
-    assert(state2.fallback == %Cachex.Fallback{ action: &String.reverse/1 })
-    assert(state5.fallback == %Cachex.Fallback{ action: &String.reverse/1 })
+    assert(fallback2 == fallback(default: &String.reverse/1))
+    assert(fallback5 == fallback(default: &String.reverse/1))
 
     # the third should have both an action and state
-    assert(state3.fallback == %Cachex.Fallback{
-      action: &String.reverse/1,
-      state: {}
-    })
+    assert(fallback3 == fallback(default: &String.reverse/1, state: {}))
 
     # the fourth should have a state but no action
-    assert(state4.fallback == %Cachex.Fallback{ state: { } })
+    assert(fallback4 == fallback(state: {}))
+
+    # an invalid fallback should actually fail
+    assert(msg == :invalid_fallback)
   end
 
   # This test will ensure that we can parse Hook values successfully. Hooks can
   # be provided as either a List or a single Hook. We also need to check that
-  # Hooks are grouped into the correct pre/post groups inside the State.
+  # Hooks are grouped into the correct pre/post groups inside the state.
   test "parsing :hooks flags" do
     # grab a cache name
     name = Helper.create_name()
 
     # create our pre hook
-    pre_hook = ForwardHook.create(%{
-      type: :pre
-    })
+    pre_hook = ForwardHook.create(:options_pre_forward_hook)
 
     # create our post hook
-    post_hook = ForwardHook.create(%{
-      type: :post
-    })
+    post_hook = ForwardHook.create(:options_post_forward_hook)
 
     # parse out valid hook combinations
-    { :ok, state1 } = Cachex.Options.parse(name, [ hooks: [ pre_hook, post_hook ] ])
-    { :ok, state2 } = Cachex.Options.parse(name, [ hooks: pre_hook ])
+    { :ok, cache(hooks: hooks1) } = Cachex.Options.parse(name, [ hooks: [ pre_hook, post_hook ] ])
+    { :ok, cache(hooks: hooks2) } = Cachex.Options.parse(name, [ hooks: pre_hook ])
+    { :ok, cache(hooks: hooks3) } = Cachex.Options.parse(name, [ ])
 
     # parse out invalid hook combinations
-    { :ok,  state3 } = Cachex.Options.parse(name, [ ])
     { :error,  msg } = Cachex.Options.parse(name, [ hooks: "[hooks]" ])
-    { :error, ^msg } = Cachex.Options.parse(name, [ hooks: %Cachex.Hook{ module: Missing }])
+    { :error, ^msg } = Cachex.Options.parse(name, [ hooks: hook(module: Missing) ])
 
     # check the hook groupings for the first state
-    assert(state1.pre_hooks == [ pre_hook ])
-    assert(state1.post_hooks == [ post_hook ])
+    assert(hooks1 == hooks(pre: [ pre_hook ], post: [ post_hook ]))
 
     # check the hook groupings in the second state
-    assert(state2.pre_hooks == [ pre_hook ])
-    assert(state2.post_hooks == [ ])
+    assert(hooks2 == hooks(pre: [ pre_hook ], post: [ ]))
 
     # check the third state uses hook defaults
-    assert(state3.pre_hooks == [ ])
-    assert(state3.post_hooks == [ ])
+    assert(hooks3 == hooks())
 
     # check the invalid hook message
     assert(msg == :invalid_hook)
   end
 
   # This test ensures that the max size options can be correctly parsed. Parsing
-  # this flag will set the Limit field inside the returned State, so it needs to
+  # this flag will set the Limit field inside the returned state, so it needs to
   # be checked. It will also add any Limit hooks to the hooks list, so this needs
   # to also be verified within this test.
   test "parsing :limit flags" do
@@ -199,160 +242,119 @@ defmodule Cachex.OptionsTest do
     name = Helper.create_name()
 
     # create a default limit
-    default = %Cachex.Limit{ }
+    default = limit()
 
     # our cache limit
     max_size = 500
-    c_limits = %Cachex.Limit{ limit: max_size }
+    c_limits = limit(size: max_size)
 
     # parse options with a valid max_size
-    { :ok, state1 } = Cachex.Options.parse(name, [ limit: max_size ])
-    { :ok, state2 } = Cachex.Options.parse(name, [ limit: c_limits ])
+    { :ok, cache(hooks: hooks1, limit: limit1) } = Cachex.Options.parse(name, [ limit: max_size ])
+    { :ok, cache(hooks: hooks2, limit: limit2) } = Cachex.Options.parse(name, [ limit: c_limits ])
+    { :ok, cache(hooks: hooks3, limit: limit3) } = Cachex.Options.parse(name, [ ])
 
     # parse options with invalid max_size
-    { :ok, state3 } = Cachex.Options.parse(name, [ limit: "max_size" ])
-    { :ok, state4 } = Cachex.Options.parse(name, [ ])
+    { :error, msg } = Cachex.Options.parse(name, [ limit: "max_size" ])
 
     # check the first and second states have limits
-    assert(state1.limit == c_limits)
-    assert(state2.limit == c_limits)
-    assert(state1.post_hooks == Cachex.Limit.to_hooks(c_limits))
-    assert(state2.post_hooks == Cachex.Limit.to_hooks(c_limits))
+    assert(limit1 == c_limits)
+    assert(limit2 == c_limits)
+    assert(hooks1 == hooks(pre: [], post: Cachex.Policy.LRW.hooks(c_limits)))
+    assert(hooks2 == hooks(pre: [], post: Cachex.Policy.LRW.hooks(c_limits)))
 
-    # check the third and fourth states have no limits
-    assert(state3.limit == default)
-    assert(state4.limit == default)
-    assert(state3.post_hooks == [])
-    assert(state4.post_hooks == [])
+    # check the third has no limits attached
+    assert(limit3 == default)
+    assert(hooks3 == hooks(pre: [], post: []))
+
+    # check the fourth causes an error
+    assert(msg == :invalid_limit)
   end
 
-  # On-Demand expiration can be disabled, and so we have to parse out whether the
-  # user has chosen to disable it or not. This is simply checking for a truthy
-  # value provided aginst disabling the expiration.
-  test "parsing :ode flags" do
-    # grab a cache name
-    name = Helper.create_name()
-
-    # parse our values as options
-    { :ok, state1 } = Cachex.Options.parse(name, [ ode: false ])
-    { :ok, state2 } = Cachex.Options.parse(name, [ ode:  true ])
-    { :ok, state3 } = Cachex.Options.parse(name, [ ])
-
-    # the first one should be truthy, and the latter two falsey
-    assert(state1.ode == false)
-    assert(state2.ode ==  true)
-    assert(state3.ode ==  true)
-  end
-
-  # This test will verify the ability to record stats in a State. This option
+  # This test will verify the ability to record stats in a state. This option
   # will just add the Cachex Stats hook to the list of hooks inside the cache.
   # We just need to verify that the hook is added after being parsed.
-  test "parsing :record_stats flags" do
+  test "parsing :stats flags" do
     # grab a cache name
     name = Helper.create_name()
 
     # create a stats hook
-    hook = %Cachex.Hook{
-      module: Cachex.Hook.Stats,
-      server_args: [ name: Cachex.Util.Names.stats(name) ]
-    }
+    hook = hook(
+      module: Cachex.Stats,
+      name: name(name, :stats)
+    )
 
-    # parse the record_stats flags
-    { :ok, state } = Cachex.Options.parse(name, [ record_stats: true ])
+    # parse the stats recording flags
+    { :ok, cache(hooks: hooks) } = Cachex.Options.parse(name, [ stats: true ])
 
     # ensure the stats hook has been added
-    assert(state.pre_hooks == [ ])
-    assert(state.post_hooks == [ hook ])
+    assert(hooks == hooks(pre: [ ], post: [ hook ]))
   end
 
   # This test will verify the parsing of transactions flags to determine whether
   # a cache has them enabled or disabled. This is simply checking whether the flag
   # is set to true or false, and the default. We also verify that the transaction
-  # manager has its name set inside the returned state.
-  test "parsing :transactions flags" do
+  # locksmith has its name set inside the returned state.
+  test "parsing :transactional flags" do
     # grab a cache name
     name = Helper.create_name()
 
     # parse our values as options
-    { :ok, state1 } = Cachex.Options.parse(name, [ transactions:  true ])
-    { :ok, state2 } = Cachex.Options.parse(name, [ transactions: false ])
-    { :ok, state3 } = Cachex.Options.parse(name, [ ])
+    { :ok, cache(transactional: trans1) } = Cachex.Options.parse(name, [ transactional:  true ])
+    { :ok, cache(transactional: trans2) } = Cachex.Options.parse(name, [ transactional: false ])
+    { :ok, cache(transactional: trans3) } = Cachex.Options.parse(name, [ ])
 
     # the first one should be truthy, and the latter two falsey
-    assert(state1.transactions == true)
-    assert(state2.transactions == false)
-    assert(state3.transactions == false)
-
-    # we also need to make sure they all have the manager name
-    assert(state1.manager == Cachex.Util.Names.manager(name))
-    assert(state2.manager == Cachex.Util.Names.manager(name))
-    assert(state3.manager == Cachex.Util.Names.manager(name))
+    assert trans1
+    refute trans2
+    refute trans3
   end
 
-  # This test verifies the parsing of TTL related flags. We have to test various
-  # combinations of :ttl_interval and :default_ttl to verify each state correctly.
-  test "parsing :ttl_interval flags" do
+  test "parsing :warmers flags" do
     # grab a cache name
     name = Helper.create_name()
 
-    # parse out valid combinations
-    { :ok, state1 } = Cachex.Options.parse(name, [ default_ttl: 1 ])
-    { :ok, state2 } = Cachex.Options.parse(name, [ default_ttl: 1, ttl_interval: -1 ])
-    { :ok, state3 } = Cachex.Options.parse(name, [ default_ttl: 1, ttl_interval: 500 ])
-    { :ok, state4 } = Cachex.Options.parse(name, [ ttl_interval: 500 ])
+    # define our warmer to pass through to the cache
+    Helper.create_warmer(:options_test_warmer, 50, fn(_) ->
+      :ignore
+    end)
 
-    # parse out invalid combinations
-    { :ok, state5 } = Cachex.Options.parse(name, [ default_ttl: "1" ])
-    { :ok, state6 } = Cachex.Options.parse(name, [ default_ttl: -1 ])
-    { :ok, state7 } = Cachex.Options.parse(name, [ ttl_interval: "1" ])
-    { :ok, state8 } = Cachex.Options.parse(name, [ ttl_interval: -1 ])
+    # parse some warmers using the options parser
+    results1 = Cachex.Options.parse(name, [ warmers: [] ])
+    results2 = Cachex.Options.parse(name, [ warmers: warmer(module: :options_test_warmer) ])
+    results3 = Cachex.Options.parse(name, [ warmers: [ warmer(module: :options_test_warmer) ] ])
+    results4 = Cachex.Options.parse(name, [ warmers: [ "warmer" ] ])
 
-    # the first state should have a default_ttl of 1 and a default ttl_interval
-    assert(state1.default_ttl == 1)
-    assert(state1.ttl_interval == 3000)
+    # the first three should all be valid
+    { :ok, cache(warmers: warmers1) } = results1
+    { :ok, cache(warmers: warmers2) } = results2
+    { :ok, cache(warmers: warmers3) } = results3
 
-    # the second state should have default_ttl 1 and ttl_interval disabled
-    assert(state2.default_ttl == 1)
-    assert(state2.ttl_interval == nil)
+    # and then we check the warmers...
+    assert warmers1 == []
+    assert warmers2 == [ warmer(module: :options_test_warmer) ]
+    assert warmers3 == warmers2
 
-    # the third state should have default_ttl of 1 and ttl_interval of 500
-    assert(state3.default_ttl == 1)
-    assert(state3.ttl_interval == 500)
-
-    # the fourth state should have default_ttl disabled and ttl_interval of 500
-    assert(state4.default_ttl == nil)
-    assert(state4.ttl_interval == 500)
-
-    # the fifth state should have ttl_interval enabled
-    assert(state5.default_ttl == nil)
-    assert(state5.ttl_interval == 3000)
-
-    # the sixth state should have ttl_interval enabled
-    assert(state6.default_ttl == nil)
-    assert(state6.ttl_interval == 3000)
-
-    # the seventh state should have ttl_interval enabled
-    assert(state7.default_ttl == nil)
-    assert(state7.ttl_interval == 3000)
-
-    # the eight state should have both disabled
-    assert(state8.default_ttl == nil)
-    assert(state8.ttl_interval == nil)
+    # the last one should be invalid
+    assert results4 == { :error, :invalid_warmer }
   end
 
-  # If we don't receive a valid list to parse options from, we just default to
-  # returning an empty state with only the cache name set. This test just checks
-  # that parsing an invalid list is the same as parsing an empty list.
-  test "parsing without a valid options list" do
-    # grab a cache name
-    name = Helper.create_name()
+  # This test simply validates the ability to retrieve and transform an option
+  # from inside a Keyword List. We validate both existing and missing options in
+  # order to make sure there are no issues when retrieving. We also verify the
+  # result of the call is the transformed result.
+  test "transforming an option value in a Keyword List" do
+    # define our list of options
+    options = [ key: "value" ]
 
-    # parse both valid and invalid options
-    { :ok, state1 } = Cachex.Options.parse(name, [ ])
-    { :ok, state2 } = Cachex.Options.parse(name, "invalid_options")
+    # define a transformer
+    transformer = &({ &1 })
 
-    # assert the two caches match
-    assert(state1 == state2)
+    # transformer various options
+    result1 = Cachex.Options.transform(options, :key, transformer)
+    result2 = Cachex.Options.transform(options, :nah, transformer)
+
+    # only the first should come back
+    assert(result1 == { "value" })
+    assert(result2 == {   nil  })
   end
-
 end

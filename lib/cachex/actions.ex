@@ -1,123 +1,99 @@
 defmodule Cachex.Actions do
-  @moduledoc false
-  # This module contains common actions required to implement cache actions, such
-  # as typical CRUD-style operations on records. This module also provides the
-  # `defaction` macro which enables the implementation of cache actions without
-  # having to manually take care of things such as Hook notifications. This used
-  # to be a simple function call (and you would pass the body as an anonymous
-  # function), but it makes sense to macro to gain that extra little piece of
-  # performance.
+  @moduledoc """
+  Parent actions module for cache interactions.
 
-  # we need some constants
-  use Cachex.Constants
+  This module contains foundation actions required to implement cache actions,
+  such as typical CRUD style operations on cache entries. It also provides the
+  `defaction/2` macro which enables command definition which injects notifications
+  for cache hooks.
+  """
+  import Cachex.Spec
 
   # add some aliases
-  alias Cachex.Hook
-  alias Cachex.State
-  alias Cachex.Util
+  alias Cachex.Services.Janitor
+
+  ##############
+  # Public API #
+  ##############
 
   @doc """
-  This macro provides a base Action template.
+  Retrieves an entry from a cache.
 
-  An action is a series of ETS operations which notify any cache Hooks both before
-  and after they execute. Rather than have this hand-written or use anonymous
-  functions, we provide a macro here. Simply use `defaction` instead of `def`
-  in the action declarations and notifications will be handled automatically.
+  If the entry does not exist, a `nil` value will be returned. Likewise
+  if the  entry has expired, we lazily remove it (if enabled) and return
+  a `nil` value.
 
-  It should be noted that the function name will be `execute` with the defined
-  arity. This is because it makes little sense to do `Cachex.Actions.Ttl.ttl()`
-  for example.
+  This will return an instance of an entry record as defined in the main
+  `Cachex.Spec` module, rather than just the raw value.
   """
-  defmacro defaction({ name, _line, [ _state | stateless_args ] = arguments }, do: body) do
-    quote do
-      def execute(unquote_splicing(arguments)) do
-        local_opts  = var!(options)
-        local_state = var!(state)
-
-        notify = Keyword.get(local_opts, :notify, true)
-
-        message = notify && case local_opts[:via] do
-          msg when not is_tuple(msg) ->
-            { unquote(name), [ unquote_splicing(stateless_args) ] }
-          msg ->
-            msg
+  @spec read(Spec.cache, any) :: Spec.entry | nil
+  def read(cache(name: name) = cache, key) do
+    case :ets.lookup(name, key) do
+      [] ->
+        nil
+      [ entry ] ->
+        case Janitor.expired?(cache, entry) do
+          false ->
+            entry
+          true  ->
+            Cachex.del(cache, key, const(:purge_override))
+            nil
         end
+    end
+  end
 
-        notify && Hook.notify(local_state.pre_hooks, message, nil)
+  @doc """
+  Updates a collection of fields inside a cache entry.
 
-        result = (unquote(body))
+  This is done in a single call due to the use of `:ets.update_element/3` which
+  allows multiple changes in a group. This will return a boolean to represent
+  whether the update was successful or not.
 
-        if notify do
-           results = Keyword.get(local_opts, :hook_result, result)
-           Hook.notify(local_state.post_hooks, message, results)
-        end
+  Note that updates are atomic; either all updates will take place, or none will.
+  """
+  @spec update(Spec.cache, any, [ tuple ]) :: { :ok, boolean }
+  def update(cache(name: name), key, changes),
+    do: { :ok, :ets.update_element(name, key, changes) }
 
-        result
+  @doc """
+  Writes a new entry into a cache.
+  """
+  @spec write(Spec.cache, [ Spec.entry ]) :: { :ok, boolean }
+  def write(cache(name: name), entries),
+    do: { :ok, :ets.insert(name, entries) }
+
+  @doc """
+  Returns the operation used for a write based on a prior value.
+  """
+  @spec write_op(atom) :: atom
+  def write_op(nil),
+    do: :put
+  def write_op(_tag),
+    do: :update
+
+  ##########
+  # Macros #
+  ##########
+
+  @doc """
+  Normalizes a value into a Courier-friendly tagged Tuple.
+
+  If the value is tagged with `:commit`, `:ignore` or `:error`,
+  it will be left alone; otherwise it will be wrapped and treated
+  as a `:commit` Tuple.
+  """
+  defmacro normalize_commit(value) do
+    quote bind_quoted: [value: value] do
+      case value do
+        { :error, _value } ->
+          value
+        { :commit, _value } ->
+          value
+        { :ignore, _value } ->
+          value
+        raw_value ->
+          { :commit, raw_value }
       end
     end
   end
-
-  @doc """
-  Reads back a key from the cache.
-
-  If the key does not exist we return a `nil` value. If the key has expired, we
-  delete it from the cache using the `:purge` action as a notification.
-  """
-  @spec read(state :: State.t, key :: any) :: Record.t | nil
-  def read(%{ cache: cache } = state, key) do
-    cache
-    |> :ets.lookup(key)
-    |> handle_read(state)
-  end
-
-  @doc """
-  Updates a number of fields in a record inside the cache, by key.
-
-  For ETS, we do this entirely in a single sweep. For Mnesia, we need to use a
-  two-step get/update from the Worker interface to accomplish the same. We then
-  use a reduction to modify the Tuple.
-  """
-  @spec update(state :: State.t, key :: any, changes :: [{}]) :: { :ok, true | false }
-  def update(%State{ cache: cache }, key, changes) do
-    cache
-    |> :ets.update_element(key, changes)
-    |> handle_update
-  end
-
-  @doc """
-  Writes a record into the cache, and returns a result signifying whether the
-  write was successful or not.
-  """
-  @spec write(state :: State.t, record :: Record.t) :: { :ok, true | false }
-  def write(%State{ cache: cache }, record) do
-    { :ok, :ets.insert(cache, record) }
-  end
-
-  # Handles the reesult from a read action in order to handle any expirations
-  # set against the key. If the key has expired, we purge it immediately to avoid
-  # any issues with consistency. If the record is valid, we just return it as is.
-  defp handle_read([{ key, touched, ttl, _value } = record], state) do
-    if Util.has_expired?(state, touched, ttl) do
-      __MODULE__.Del.execute(state, key, @purge_override)
-      nil
-    else
-      record
-    end
-  end
-  defp handle_read(_missing, _state), do: nil
-
-  # Handles an update result, converting a falsey result into a Tuple tagged with
-  # the :missing atom. If the result is true, we just return a Tuple tagged with
-  # the :ok atom.
-  defp handle_update( true), do: { :ok, true }
-  defp handle_update(false), do: { :missing, false }
-
-  @doc false
-  defmacro __using__(_) do
-    quote do
-      use Cachex.Constants
-      import Cachex.Actions
-    end
-  end
-
 end

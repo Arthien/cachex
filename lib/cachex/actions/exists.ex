@@ -1,37 +1,25 @@
 defmodule Cachex.Actions.Exists do
   @moduledoc false
-  # This module controls the implementation behind checking whether a record
-  # exists inside the cache. It's a little more complicated than just checking
-  # cache membership, because we also need to take TTL into account.
-
-  # we need our imports
-  use Cachex.Actions
-
-  # add some aliases
+  # Command module to allow checking for entry existence.
+  #
+  # This is very straightfoward, but is a little more than an `:ets.member/2`
+  # call as we also need to validate expiration time to stay consistent.
   alias Cachex.Actions
-  alias Cachex.State
+
+  # add required macros
+  import Cachex.Spec
+
+  ##############
+  # Public API #
+  ##############
 
   @doc """
-  Checks if an item exists in a cache.
+  Checks whether an entry exists in a cache.
 
-  We simply return true of false if membership is detected. This operation has
-  to do a read in order to validate that the TTL has expired, so we delegate to
-  the generic read action to do the lifting for us.
-
-  There are currently no recognised options, the argument only exists for future
-  proofing.
+  This is a little more involved than a straight ETS call, as we need to take
+  the expiration time of the entry into account. As such, we call via the main
+  `Cachex.Actions` module and just cast the result to a boolean.
   """
-  defaction exists?(%State{ } = state, key, options) do
-    state
-    |> Actions.read(key)
-    |> handle_record
-  end
-
-  # Handles the record coming back from our read and converts the result into
-  # a true or false value. If the record is missing we just return false.
-  defp handle_record({ _key, _touched, _ttl, _value }),
-    do: { :ok, true }
-  defp handle_record(_missing),
-    do: { :ok, false }
-
+  def execute(cache() = cache, key, _options),
+    do: { :ok, !!Actions.read(cache, key) }
 end

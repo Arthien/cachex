@@ -1,16 +1,20 @@
 defmodule Cachex.Actions.Dump do
   @moduledoc false
-  # This module controls the implementation for the `dump` command, which writes
-  # out a given cache directly to disk at the provided file location. This can
-  # then be imported using the `load` command to allow moving of caching between
-  # nodes and machines.
-
-  # we need our imports
-  use Cachex.Actions
-
-  # add some aliases
+  # Command module to allow serialization of a cache to disk.
+  #
+  # Rather than using DETS to back up the internal ETS table, this module will
+  # serialize the entire table using the ETF via the `Cachex.Disk` module.
+  #
+  # Backups can be imported again using the `load()` command, and should be
+  # able to be transferred between processes and physical nodes.
   alias Cachex.Disk
-  alias Cachex.State
+
+  # import our macros
+  import Cachex.Spec
+
+  ##############
+  # Public API #
+  ##############
 
   @doc """
   Dumps a cache to disk at the given location.
@@ -26,10 +30,11 @@ defmodule Cachex.Actions.Dump do
   Passing a 0 compressed flag will disable compression. This is way faster than
   the default compression, but the file size will increase dramatically.
   """
-  defaction dump(%State{ cache: cache } = state, path, options) do
+  def execute(cache() = cache, path, options) do
+    eopts = Keyword.take(options, [ :local ])
     cache
-    |> :ets.tab2list
+    |> Cachex.export(eopts ++ const(:notify_false))
+    |> Kernel.elem(1)
     |> Disk.write(path, options)
   end
-
 end

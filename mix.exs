@@ -1,6 +1,7 @@
 defmodule Cachex.Mixfile do
   use Mix.Project
 
+  @version "3.2.0"
   @url_docs "http://hexdocs.pm/cachex"
   @url_github "https://github.com/whitfin/cachex"
 
@@ -22,33 +23,49 @@ defmodule Cachex.Mixfile do
         },
         maintainers: [ "Isaac Whitfield" ]
       },
-      version: "2.1.0",
+      version: @version,
       elixir: "~> 1.2",
       deps: deps(),
       docs: [
-        source_ref: "master",
+        source_ref: "v#{@version}",
         source_url: @url_github,
         main: "getting-started",
+        extra_section: "guides",
         extras: [
-          "docs/getting-started.md",
-          "docs/action-blocks.md",
-          "docs/cache-limits.md",
-          "docs/custom-commands.md",
-          "docs/disk-interaction.md",
-          "docs/execution-hooks.md",
-          "docs/fallback-caching.md",
-          "docs/ttl-implementation.md",
-          "docs/migrating-to-v2.x.md"
+          "docs/features/cache-warming/reactive-warming.md",
+          "docs/features/cache-warming/proactive-warming.md",
+          "docs/features/action-blocks.md",
+          "docs/features/cache-limits.md",
+          "docs/features/custom-commands.md",
+          "docs/features/disk-interaction.md",
+          "docs/features/distributed-caches.md",
+          "docs/features/execution-hooks.md",
+          "docs/features/streaming-caches.md",
+          "docs/features/ttl-implementation.md",
+          "docs/migrations/migrating-to-v3.md",
+          "docs/migrations/migrating-to-v2.md",
+          "docs/getting-started.md"
+        ],
+        groups_for_extras: [
+          "Features": Path.wildcard("docs/features/*.md"),
+          "Cache Warming": Path.wildcard("docs/features/cache-warming/*.md"),
+          "Migration": Path.wildcard("docs/migrations/*.md")
         ]
       ],
       test_coverage: [
         tool: ExCoveralls
       ],
       preferred_cli_env: [
-        "cachex": :test,
-        "coveralls": :test,
-        "coveralls.html": :test,
-        "coveralls.travis": :test
+        docs: :docs,
+        bench: :bench,
+        credo: :lint,
+        cachex: :test,
+        coveralls: :cover,
+        "coveralls.html": :cover,
+        "coveralls.travis": :cover
+      ],
+      aliases: [
+        bench: "run benchmarks/main.exs"
       ]
     ]
   end
@@ -58,7 +75,12 @@ defmodule Cachex.Mixfile do
   # Type "mix help compile.app" for more information
   def application do
     [
-      applications: [:logger, :eternal],
+      applications: [
+        :logger,
+        :eternal,
+        :sleeplocks,
+        :jumper
+      ],
       mod: {Cachex.Application, []}
     ]
   end
@@ -75,15 +97,20 @@ defmodule Cachex.Mixfile do
   defp deps do
     [
       # Production dependencies
-      { :eternal, "~> 1.1" },
-      { :unsafe,  "~> 1.0" },
-      # Local dependencies
-      { :benchfella,  "~> 0.3",  optional: true, only: [ :dev, :test ] },
-      { :bmark,       "~> 1.0",  optional: true, only: [ :dev, :test ] },
-      { :credo,       "~> 0.8",  optional: true, only: [ :dev, :test ] },
-      { :ex_doc,      "~> 0.16", optional: true, only: [ :dev, :test ] },
-      { :excoveralls, "~> 0.7",  optional: true, only: [ :dev, :test ] },
-      { :exprof,      "~> 0.2",  optional: true, only: [ :dev, :test ] }
+      { :eternal,     "~> 1.2" },
+      { :jumper,      "~> 1.0" },
+      { :sleeplocks,  "~> 1.1" },
+      { :unsafe,      "~> 1.0" },
+      # Testing dependencies
+      { :excoveralls,   "~> 0.11", optional: true, only: [ :cover ] },
+      { :local_cluster, "~> 1.1",  optional: true, only: [ :cover, :test ] },
+      # Linting dependencies
+      { :credo, "~> 1.1", optional: true, only: [ :lint ] },
+      # Benchmarking dependencies
+      { :benchee,      "~> 1.0", optional: true, only: [ :bench ] },
+      { :benchee_html, "~> 1.0", optional: true, only: [ :bench ] },
+      # Documentation dependencies
+      { :ex_doc, "~> 0.21", optional: true, only: [ :docs ] }
     ]
   end
 end

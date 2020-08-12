@@ -45,12 +45,8 @@
         {Credo.Check.Design.AliasUsage, priority: :low},
         # For others you can set parameters
         {Credo.Check.Design.DuplicatedCode, mass_threshold: 16, nodes_threshold: 2},
-
-        # You can also customize the exit_status of each check.
-        # If you don't want TODO comments to cause `mix credo` to fail, just
-        # set this value to 0 (zero).
-        {Credo.Check.Design.TagTODO, exit_status: 0},
-        {Credo.Check.Design.TagFIXME},
+        {Credo.Check.Design.TagTODO, false},
+        {Credo.Check.Design.TagFIXME, false},
 
         {Credo.Check.Readability.FunctionNames},
         {Credo.Check.Readability.LargeNumbers},
@@ -70,7 +66,7 @@
         {Credo.Check.Refactor.DoubleBooleanNegation},
 
         {Credo.Check.Refactor.ABCSize, max_size: 50},
-        {Credo.Check.Refactor.CaseTrivialMatches},
+        {Credo.Check.Refactor.CaseTrivialMatches, false},
         {Credo.Check.Refactor.CondStatements},
         {Credo.Check.Refactor.CyclomaticComplexity},
         {Credo.Check.Refactor.FunctionArity},
@@ -89,10 +85,6 @@
         {Credo.Check.Warning.BoolOperationOnSameValues},
         {Credo.Check.Warning.IExPry},
         {Credo.Check.Warning.IoInspect},
-        {Credo.Check.Warning.NameRedeclarationByAssignment},
-        {Credo.Check.Warning.NameRedeclarationByCase},
-        {Credo.Check.Warning.NameRedeclarationByDef},
-        {Credo.Check.Warning.NameRedeclarationByFn},
         {Credo.Check.Warning.OperationOnSameValues},
         {Credo.Check.Warning.OperationWithConstantResult},
         {Credo.Check.Warning.UnusedEnumOperation},

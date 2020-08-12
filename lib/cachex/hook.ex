@@ -1,199 +1,189 @@
 defmodule Cachex.Hook do
-  @moduledoc false
-  # This module defines the hook implementations for Cachex, allowing the user to
-  # add hooks into the command execution. This means that users can build plugin
-  # style listeners in order to do things like logging. Hooks can be registered
-  # to execute either before or after the Cachex command, and can be blocking as
-  # needed.
+  @moduledoc """
+  Module controlling hook behaviour definitions.
 
-  # use our constants
-  use Cachex.Constants
+  This module defines the hook implementations for Cachex, allowing the user to
+  add hooks into the command execution. This means that users can build plugin
+  style listeners in order to do things like logging. Hooks can be registered
+  to execute either before or after the Cachex command, and can be blocking as
+  needed.
+  """
 
-  # add some aliases
-  alias Cachex.State
-  alias Supervisor.Spec
-
-  # define our opaque type
-  @opaque t :: %__MODULE__{ }
-
-  # define our struct
-  defstruct args: [],           # args to provide to init/1
-            async: true,        # whether to run async or not
-            max_timeout: nil,   # a timeout to use against sync hooks
-            module: nil,        # the backing module of the Hook
-            ref: nil,           # the proc the hook lives in
-            provide: [],        # things to provide to the hook
-            server_args: [],    # arguments to pass to the hook server
-            type: :post         # whether the hook runs before or after the action
+  #############
+  # Behaviour #
+  #############
 
   @doc """
-  Broadcasts a custom message to all attached post hooks.
+  Returns the actions this hook is expected to listen on.
 
-  This exists because there are a number of processes which need to submit their
-  values into the hooks, but don't have their own state or an outdated state.
-
-  It only makes sense to send to post_hooks because at this point the action has
-  already taken effect on the cache.
+  This will default to the atom `:all`, which signals that all actions should
+  be reported to the hook. If not this atom, an enumerable of atoms should be
+  returned.
   """
-  def broadcast(cache, action, result) when is_atom(cache) do
-    case State.get(cache) do
-      nil -> false
-      val -> notify(val.post_hooks, action, result)
-    end
-  end
+  @callback actions :: :all | [ atom ]
 
   @doc """
-  Groups hooks by their execution type (pre/post).
-
-  We use this to separate the execution phases in order to achieve a smaller
-  iteration at later stages of execution (it saves a microsecond or so).
+  Returns whether this hook is asynchronous or not.
   """
-  def group_by_type(hooks) do
-    hooks
-    |> List.wrap
-    |> Enum.group_by(fn
-        (%__MODULE__{ "type": type }) -> type
-        (_) -> nil
-       end)
-    |> Map.put_new(:pre, [])
-    |> Map.put_new(:post, [])
-  end
+  @callback async? :: boolean
 
   @doc """
-  Groups hooks by a given execution type.
+  Returns an enumerable of provisions this hook requires.
 
-  Internally we just use `group_by_type/1` and pluck the required type to avoid
-  duplication of code here (it's not hit often).
+  The current provisions available to a hook are:
+
+    * `cache` - a cache instance used to make cache calls from inside a hook
+      with zero overhead.
+
+  This should always return an enumerable of atoms; in the case of no required
+  provisions an empty enumerable should be returned.
   """
-  def group_by_type(hooks, type) when type in [ :pre, :post ],
-    do: group_by_type(hooks)[type]
+  @callback provisions :: [ atom ]
 
   @doc """
-  Notifies a listener of the passed in data.
+  Returns the timeout for all calls to this hook.
 
-  If the data is a list, we convert it to a tuple in order to make it easier to
-  pattern match against. We accept a list of listeners in order to allow for
-  multiple (plugin style) listeners. Initially had the empty clause at the top
-  but this way is better (at the very worst it's the same performance).
+  This will be applied to hooks regardless of whether they're synchronous or
+  not; a behaviour change which shipped in v3.0 initially.
   """
-  def notify(hooks, action, result \\ nil)
-  def notify([hook|tail], action, result) do
-    do_notify(hook, { action, result })
-    notify(tail, action, result)
-  end
-  def notify([], _action, _result),
-    do: true
-
-  # Internal emission, used to define whether we send using an async request or
-  # not. We also determine whether to pass the results back at this point or not.
-  # This only happens for post-hooks, and if the results have been requested. We
-  # skip the overhead in GenEvent and go straight to `send/2` to gain all speed
-  # possible here.
-  defp do_notify(%__MODULE__{ ref: nil }, _event),
-    do: nil
-  defp do_notify(%__MODULE__{ async: true, ref: ref }, event),
-    do: GenServer.cast(ref, { :cachex_notify, event })
-  defp do_notify(%__MODULE__{ max_timeout: nil, ref: ref }, event),
-    do: GenServer.call(ref, { :cachex_notify, event }, :infinity)
-  defp do_notify(%__MODULE__{ max_timeout: val, ref: ref }, event),
-    do: GenServer.call(ref, { :cachex_notify, event, val }, :infinity)
+  @callback timeout :: nil | integer
 
   @doc """
-  Generates a Supervisor specification for a hook.
+  Returns the type of this hook.
+
+  This should return `:post` to fire after a cache action has occurred, and
+  return `:pre` if it should fire before the action occurs.
   """
-  def spec(%__MODULE__{ module: mod, args: args, server_args: opts }),
-    do: Spec.worker(GenServer, [ mod, args, opts ], [ id: mod ])
+  @callback type :: :pre | :post
 
   @doc """
-  Validates a set of Hooks.
+  Handles a cache notification.
 
-  On successful validation, this returns a list of valid hooks against a Tuple
-  tagged as ok. If any of the hooks are invalid, we halt and return an error in
-  order to indicate the error to the user.
+  The first argument is the action being taken along with arguments, with the
+  second argument being the results of the action (this can be nil for hooks)
+  which fire before the action is executed.
   """
-  def validate(hooks) do
-    hooks
-    |> List.wrap
-    |> do_validate([])
-  end
+  @callback handle_notify(tuple, tuple, any) :: { :ok, any }
 
-  # Validates a list of Hooks. If a hook has a valid module backing it, it is
-  # treated as valid (any crashes following are down to the user at that point).
-  # If not, we return an error to halt the validation. To check for a valid module,
-  # we just try to call `__info__/1` on the module.
-  defp do_validate([ %__MODULE__{ module: mod } = hook | rest ], acc) do
-    try do
-      mod.__info__(:module)
-      do_validate(rest, [ hook | acc ])
-    rescue
-      _ -> @error_invalid_hook
-    end
-  end
-  defp do_validate([ _invalid | _rest ], _acc),
-    do: @error_invalid_hook
-  defp do_validate([ ], acc),
-    do: { :ok, Enum.reverse(acc) }
+  @doc """
+  Handles a provisioning call.
+
+  The provided argument will be a Tuple dictating the type of value being
+  provisioned along with the value itself. This can be used to listen on
+  states required for hook executions (such as cache records).
+  """
+  @callback handle_provision({ atom, any }, any) :: { :ok, any }
+
+  ##################
+  # Implementation #
+  ##################
 
   @doc false
   defmacro __using__(_) do
     quote location: :keep do
-      # inherit GenEvent
+      # force the Hook behaviours
+      @behaviour Cachex.Hook
+
+      # inherit server
       use GenServer
 
-      # force the Hook behaviours
-      @behaviour Cachex.Hook.Behaviour
+      @doc false
+      def init(args),
+        do: { :ok, args }
+
+      # allow overriding of init
+      defoverridable [ init: 1 ]
+
+      #################
+      # Configuration #
+      #################
 
       @doc false
-      def init(args) do
-        {:ok, args}
-      end
+      def actions,
+        do: :all
 
       @doc false
-      def handle_notify(event, results, state) do
-        {:ok, state}
-      end
+      def async?,
+        do: true
 
       @doc false
-      def handle_cast({ :cachex_notify, { event, result } }, state) do
-        { :ok, new_state } = handle_notify(event, result, state)
+      def provisions,
+        do: []
+
+      @doc false
+      def timeout,
+        do: nil
+
+      @doc false
+      def type,
+        do: :post
+
+      # config overrides
+      defoverridable [
+        actions: 0,
+        async?: 0,
+        provisions: 0,
+        timeout: 0,
+        type: 0
+      ]
+
+      #########################
+      # Notification Handlers #
+      #########################
+
+      @doc false
+      def handle_notify(event, result, state),
+        do: { :ok, state }
+
+      @doc false
+      def handle_provision(provisions, state),
+        do: { :ok, state }
+
+      # listener override
+      defoverridable [
+        handle_notify: 3,
+        handle_provision: 2
+      ]
+
+      ##########################
+      # Private Implementation #
+      ##########################
+
+      @doc false
+      def handle_info({ :cachex_reset, args }, state) do
+        { :ok, new_state } = init(args)
         { :noreply, new_state }
       end
 
       @doc false
-      def handle_cast({ :cachex_reset, args }, state) do
-        { :ok, new_state } = apply(__MODULE__, :init, args)
+      def handle_info({ :cachex_provision, provisions }, state) do
+        { :ok, new_state } = handle_provision(provisions, state)
         { :noreply, new_state }
       end
 
       @doc false
-      def handle_call({ :cachex_notify, { event, result } } = msg, _ctx, state) do
-        { :ok, new_state } = handle_notify(event, result, state)
-        { :reply, :ok, new_state }
-      end
+      def handle_info({ :cachex_notify, { event, result } }, state) do
+        case timeout() do
+          nil ->
+            { :ok, new_state } = handle_notify(event, result, state)
+            { :noreply, new_state }
+          val ->
+            task = Task.async(fn ->
+              handle_notify(event, result, state)
+            end)
 
-      @doc false
-      def handle_call({ :cachex_notify, { event, result }, timeout } = msg, _ctx, state) do
-        task = Task.async(fn ->
-          handle_notify(event, result, state)
-        end)
-
-        case Task.yield(task, timeout) do
-          { :ok, { :ok, new_state } } ->
-            { :reply, :ok, new_state }
-          _timeout ->
-            Task.shutdown(task)
-            { :reply, :hook_timeout, state }
+            case Task.yield(task, val) || Task.shutdown(task) do
+              { :ok, { :ok, new_state } } -> { :noreply, state }
+              nil -> { :noreply, state }
+            end
         end
       end
 
-      # Allow overrides of everything *except* the handle_event implementation.
-      # We reserve that for internal use in order to make Hook definitions as
-      # straightforward as possible.
-      defoverridable [
-        init: 1,
-        handle_notify: 3
-      ]
+      @doc false
+      def handle_call({ :cachex_notify, _message } = message, _ctx, state) do
+        { :noreply, new_state } = handle_info(message, state)
+        { :reply, :ok, new_state }
+      end
     end
   end
-
 end

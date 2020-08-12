@@ -1,31 +1,25 @@
 defmodule Cachex.Actions.Count do
   @moduledoc false
-  # This module provides the action dedicated to counting the number of items
-  # which currently exist in the cache. The Count action makes sure to take the
-  # expiration time of items into consideration when returning this count.
+  # Command module to allow the counting of a cache.
+  #
+  # Counting a cache will make sure to take the expiration time of items into
+  # consideration, making the semantics different to those of the `size()` calls.
+  alias Cachex.Query
 
-  # we need our imports
-  use Cachex.Actions
+  # import needed macros
+  import Cachex.Spec
 
-  # add some aliases
-  alias Cachex.State
-  alias Cachex.Util
+  ##############
+  # Public API #
+  ##############
 
   @doc """
   Counts the number of items in a cache.
 
-  We only return the number of items which have not yet expired. This means that
-  if there are items currently inside the cache which are set to be removed by
-  the next purge call, they will not be included in this count.
-
-  There are currently no recognised options, the argument only exists for future
-  proofing.
+  This will only return the number of items which have not yet expired; this
+  means that any items set to be removed in the next purge will not be added
+  to the count. Lazy expiration does not apply to this call.
   """
-  defaction count(%State{ cache: cache } = state, options) do
-    query = Util.retrieve_all_rows(true)
-    count = :ets.select_count(cache, query)
-
-    { :ok, count }
-  end
-
+  def execute(cache(name: name), _options),
+    do: { :ok, :ets.select_count(name, Query.unexpired(true)) }
 end

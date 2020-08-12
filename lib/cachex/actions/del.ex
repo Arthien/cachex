@@ -1,33 +1,27 @@
 defmodule Cachex.Actions.Del do
   @moduledoc false
-  # This module contains the implementation of the delete action, which removes
-  # a given entry from the cache. The Del action executes in a lock-aware way
-  # which ensures consistency against Transactions.
+  # Command module to allow removal of a cache entry.
+  alias Cachex.Services.Locksmith
 
-  # we need our imports
-  use Cachex.Actions
+  # import required macros
+  import Cachex.Spec
 
-  # add some aliases
-  alias Cachex.LockManager
-  alias Cachex.State
+  ##############
+  # Public API #
+  ##############
 
   @doc """
-  Removes a given item from the cache.
+  Removes an entry from a cache by key.
 
-  This function will always return a truthy response, which signals that regardless
-  of whether the key existed in the cache previously, it is guaranteed to not
-  exist any longer.
+  This command will always return a true value, signalling that the key no longer
+  exists in the cache (regardless of whether it previously existed).
 
-  We execute the delete calls under a LockManager context to ensure that we're
-  respective of any Transaction locks currently being held against the key.
-
-  There are currently no recognised options, the argument only exists for future
-  proofing.
+  Removal runs in a lock aware context, to ensure that we're not removing a key
+  being used inside a transaction in other places in the codebase.
   """
-  defaction del(%State{ cache: cache } = state, key, options) do
-    LockManager.write(state, key, fn ->
-      { :ok, :ets.delete(cache, key) }
+  def execute(cache(name: name) = cache, key, _options) do
+    Locksmith.write(cache, [ key ], fn ->
+      { :ok, :ets.delete(name, key) }
     end)
   end
-
 end

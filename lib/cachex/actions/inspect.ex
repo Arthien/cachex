@@ -1,107 +1,150 @@
 defmodule Cachex.Actions.Inspect do
   @moduledoc false
-  # This module contains inspection tools for a cache. Cache inspection can be
-  # anything from checking the current expired keyspace, to pulling the raw doc
-  # back from the cache. Options are defined in function heads to make the module
-  # easier to follow for newcomers.
+  # Command module to enable cache inspection.
+  #
+  # Cache inspection can be anything from checking the current size of the
+  # expired keyspace to pulling raw entry records back from the table.
+  #
+  # Due to the nature of inspection, behaviour in this module can change
+  # at any time - not only with major increments of the library version.
+  alias Cachex.Query
+  alias Cachex.Services
+  alias Services.Janitor
+  alias Services.Overseer
 
-  # we need constants
-  use Cachex.Constants
+  # we need macros
+  import Cachex.Errors
+  import Cachex.Spec
 
-  # add any aliases
-  alias Cachex.State
-  alias Cachex.Util
-
-  # save the inspect function
-  import Kernel, except: [ inspect: 2 ]
-
-  # define our accepted options
+  # define our accepted options for the inspection calls
   @type option :: { :expired, :count } | { :expired, :keys } |
                   { :janitor, :last  } | { :memory, :bytes } |
                   { :memory, :binary } | { :memory, :words } |
-                  { :record,     any } |   :state
+                  { :entry,      any } |   :cache
+
+  # pre-calculated memory size
+  @memory_exponent :math.log(1024)
+
+  # internal map of memory suffixes
+  @memory_suffixes %{
+    0.0 => "B",
+    1.0 => "KiB",
+    2.0 => "MiB",
+    3.0 => "GiB",
+    4.0 => "TiB"
+  }
+
+  # the number of suffixes stored (not including B)
+  @memory_sufcount map_size(@memory_suffixes) - 1.0
+
+  ##############
+  # Public API #
+  ##############
 
   @doc """
   Inspect various things about a cache.
 
-  This action offers the ability to retrieve various pieces of information about
-  a cache, such as memory and metadata about internal processes. There are many
-  options so we call a private function named `inspect/2`, and each option is
-  documented individually.
+  Inspection offers the ability to retrieve pieces of information about a cache
+  and the associated services, such as memory use and metadata about internal
+  processes.
+
+  There are many options broken up by function head, so please see the source
+  commands for definition for further documentation.
   """
-  def execute(state, option), do: inspect(state, option)
+  def execute(cache, option, options)
 
-  # Returns the number of expired documents which currently live inside the cache
-  # (i.e. those which will be removed if a Janitor purge executes). We do this
-  # with a simple count query using the utils to generate the query easily.
-  defp inspect(%State{ cache: cache }, { :expired, :count }) do
-    query = Util.retrieve_expired_rows(true)
-    { :ok, :ets.select_count(cache, query) }
-  end
-
-  # Returns the keys of expired documents which currently live inside the cache
-  # (i.e. those which will be removed if a Janitor purge executes). This is very
-  # expensive if there are a lot of keys expired, so use wisely.
-  defp inspect(%State{ cache: cache }, { :expired, :keys }) do
-    query = Util.retrieve_expired_rows(:key)
-    { :ok, :ets.select(cache, query) }
-  end
-
-  # Returns information about the last run of a Janitor process (if there is one).
-  # We make sure to try validate the existence of the Janitor before calling it,
-  # but a crash here shouldn't really be an issue (as it's used for debugging).
+  # Retrieves the internal state of the cache.
   #
-  # If the Janitor doesn't exist, an error is returned to inform the user, otherwise
-  # we just return the metadata in an ok Tuple.
-  defp inspect(%State{ janitor: ref }, { :janitor, :last }) do
-    if :erlang.whereis(ref) != :undefined do
-      { :ok, GenServer.call(ref, :last) }
-    else
-      @error_janitor_disabled
+  # This is relatively easy to get via other methods, but it's available here
+  # as the "best" way for a developer to do so (outside of the internal API).
+  def execute(cache(name: name), :cache, _options),
+    do: { :ok, Overseer.retrieve(name) }
+
+  # Retrieves a raw entry from the cache table.
+  #
+  # This is useful when you need access to a record which may have expired. If
+  # the entry does not exist, a nil value will be returned instead. Expirations
+  # are not taken into account (either lazily or otherwise) on this read call.
+  def execute(cache(name: name), { :entry, key }, _options) do
+    case :ets.lookup(name, key) do
+      [ ] -> { :ok, nil }
+      [e] -> { :ok,   e }
     end
   end
 
-  # Retrieves the current size of the underlying ETS table backing the cache and
-  # returns it as a number of bytes after using the system word size for the
-  # calculation.
-  defp inspect(%State{ } = state, { :memory, :bytes }) do
-    { :ok, mem_words } = inspect(state, { :memory, :words })
+  # Returns the number of expired entries currently inside the cache.
+  #
+  # The number of entries returned represents the number of records which will
+  # be removed on the next run of the Janitor service. It does not track the
+  # number of expired records which have already been purged or removed.
+  def execute(cache(name: name), { :expired, :count }, _options),
+   do: { :ok, :ets.select_count(name, Query.expired(true)) }
+
+  # Returns the keys of expired entries currently inside the cache.
+  #
+  # This is essentially the same as the definition above, except that it will
+  # return the list of entry keys rather than just a count. Naturally this is
+  # an expensive call and should really only be used when debugging.
+  def execute(cache(name: name), { :expired, :keys }, _options),
+    do: { :ok, :ets.select(name, Query.expired(:key)) }
+
+  # Returns information about the last run of the Janitor service.
+  #
+  # This calls through to the Janitor server, and so might take a while if the
+  # server is currently in the process of purging records. The returned metadata
+  # schema is defined in the `Cachex.Services.Janitor` module.
+  #
+  # In the case the Janitor service is not running, an error will be returned.
+  def execute(cache() = cache, { :janitor, :last }, _options),
+    do: Janitor.last_run(cache)
+
+  # Retrieves the current size of the backing cache table in bytes.
+  #
+  # This should be treated as an estimation as it's rounded based on
+  # the number of words used to maintain the cache.
+  def execute(cache() = cache, { :memory, :bytes }, options) do
+    { :ok, mem_words } = execute(cache, { :memory, :words }, options)
     { :ok, mem_words * :erlang.system_info(:wordsize) }
   end
 
-  # Retrieves the current size of the underlying ETS table backing the cache and
-  # returns it as a human readable binary representation. This uses the inspect
-  # action to calculate the byte count of a cache under the hood.
-  defp inspect(%State{ } = state, { :memory, :binary }) do
-    { :ok, bytes } = inspect(state, { :memory, :bytes })
-    { :ok, Util.bytes_to_readable(bytes) }
+  # Retrieves the current size of the backing cache table in a readable format.
+  #
+  # This should be treated as an estimation as it's rounded based on the number
+  # of words used to maintain the cache.
+  def execute(cache() = cache, { :memory, :binary }, options) do
+    { :ok, bytes } = execute(cache, { :memory, :bytes }, options)
+    { :ok, bytes_to_readable(bytes) }
   end
 
-  # Retrieves the current word count of the underlying ETS table backing the cache
-  # and returns it in an ok Tuple. It is unlikely the user will ever need this,
-  # but the other memory inspections use it so it doesn't hurt to expose it anyway.
-  defp inspect(%State{ cache: cache }, { :memory, :words }) do
-    { :ok, :ets.info(cache, :memory) }
+  # Retrieves the current size of the backing cache table in machine words.
+  #
+  # It's unlikely the caller will want to use this directly, but as it's used
+  # by other inspection methods there's no harm in exposing it in the API.
+  def execute(cache(name: name), { :memory, :words }, _options),
+    do: { :ok, :ets.info(name, :memory) }
+
+  # Catch-all to return an error.
+  def execute(_cache, _option, _options),
+    do: error(:invalid_option)
+
+  # Converts a number of bytes to a binary representation.
+  #
+  # Just to avoid confusion, binary here means human readable.
+  # We only support up to TiB. Anything over will just group
+  # under TiB. For example, a PiB would be `16384.00 TiB`.
+  defp bytes_to_readable(bytes) when is_integer(bytes) do
+    index =
+      bytes
+      |> :math.log
+      |> :erlang./(@memory_exponent)
+      |> Float.floor
+      |> :erlang.min(@memory_sufcount)
+
+    abbrev = bytes / :math.pow(1024, index)
+    suffix = Map.get(@memory_suffixes, index)
+
+    "~.2f ~s"
+    |> :io_lib.format([ abbrev, suffix ])
+    |> IO.iodata_to_binary
   end
-
-  # Retrieves a raw record from the cache, specified by the provided key. This
-  # is useful when you need access to a record which may have expired. If the
-  # record doesn't exist, a nil value will be returned instead.
-  defp inspect(%State{ cache: cache }, { :record, key }) do
-    case :ets.lookup(cache, key) do
-      [ ] -> { :ok, nil }
-      [r] -> { :ok,   r }
-    end
-  end
-
-  # Simply returns the current state of the cache. This is easy enough to get
-  # through other methods, but it's available here to refer to as the "best"
-  # way for a consumer to do so (someone who isn't developing Cachex).
-  defp inspect(%State{ cache: cache }, :state) do
-    { :ok, State.get(cache) }
-  end
-
-  # This is just a catch all to tell the user they asked for an invalid option.
-  defp inspect(_cache, _option), do: @error_invalid_option
-
 end

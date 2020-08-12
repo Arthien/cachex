@@ -1,43 +1,33 @@
 defmodule Cachex.Actions.Ttl do
   @moduledoc false
-  # This module controls TTL retrieval for cache records by calculating the offset
-  # between the touch and ttl fields inside a record. The implementation also
-  # accounts for expirations in order to ensure consistency in results provided
-  # to the developer.
+  # Command module to retrieve the TTL for a cache entry.
+  #
+  # TTL retrieval for cache records is determined by calculating the offset
+  # between the touch time and the expiration set against an entry instance.
+  #
+  # Lazy expiration is also taken into account in this module to avoid giving
+  # negative TTL values back to the caller.
+  alias Cachex.Actions
 
   # we need our imports
-  use Cachex.Actions
+  import Cachex.Spec
 
-  # add some aliases
-  alias Cachex.Actions
-  alias Cachex.State
-  alias Cachex.Util
+  ##############
+  # Public API #
+  ##############
 
   @doc """
   Retrieves the remaining TTL for a cache item.
 
-  If the cache item has no TTL, a nil value is returned. If the item is missing,
-  a nil is returned, tagged with a :missing flag. Otherwise a Tuple of :ok and
-  the remaining time to list (in milliseconds) is returned.
-
-  There are currently no recognised options, the argument only exists for future
-  proofing.
+  If a cache entry has no expiration set a nil value will be returned, otherwise
+  the offset is determined from the record fields and returned to the caller.
   """
-  defaction ttl(%State{ } = state, key, options) do
-    state
-    |> Actions.read(key)
-    |> handle_record
+  def execute(cache() = cache, key, _options) do
+    case Actions.read(cache, key) do
+      entry(touched: touched, ttl: ttl) when not is_nil(ttl) ->
+        { :ok, touched + ttl - now() }
+      _anything_else ->
+        { :ok, nil }
+    end
   end
-
-  # Handles the record coming back from the read. We normalize the TTL value at
-  # this point. If there is no TTL, we return a nil value. Otherwise we calculate
-  # the time remaining and return that to the user. If the record does not exist,
-  # we just return a missing result.
-  defp handle_record({ _key, _touched, nil, _value }),
-    do: { :ok, nil }
-  defp handle_record({ _key, touched, ttl, _value }),
-    do: { :ok, touched + ttl - Util.now() }
-  defp handle_record(_missing),
-    do: { :missing, nil }
-
 end

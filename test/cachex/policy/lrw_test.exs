@@ -9,11 +9,11 @@ defmodule Cachex.Policy.LRWTest do
     cache = Helper.create_cache()
 
     # retrieve the cache state
-    state = Cachex.State.get(cache)
+    state = Services.Overseer.retrieve(cache)
 
     # add 5000 keys to the cache
     for x <- 1..5000 do
-      { :ok, true } = Cachex.set(state, x, x)
+      { :ok, true } = Cachex.put(state, x, x)
     end
 
     # retrieve the cache size
@@ -30,27 +30,26 @@ defmodule Cachex.Policy.LRWTest do
   # notified of the evictions that occurred.
   test "evicting when a cache crosses a limit" do
     # create a forwarding hook
-    hook = ForwardHook.create(%{
-      results: true
-    })
+    hook = ForwardHook.create()
 
     # define our cache limit
-    limit = %Cachex.Limit{
-      limit: 100,
+    limit = limit(
+      size: 100,
       policy: Cachex.Policy.LRW,
-      reclaim: 0.75
-    }
+      reclaim: 0.75,
+      options: [ batch_size: 25 ]
+    )
 
     # create a cache with a max size
     cache = Helper.create_cache([ hooks: [ hook ], limit: limit ])
 
     # retrieve the cache state
-    state = Cachex.State.get(cache)
+    state = Services.Overseer.retrieve(cache)
 
     # add 1000 keys to the cache
     for x <- 1..100 do
       # add the entry to the cache
-      { :ok, true } = Cachex.set(state, x, x)
+      { :ok, true } = Cachex.put(state, x, x)
 
       # tick to make sure each has a new touch time
       :timer.sleep(1)
@@ -66,7 +65,7 @@ defmodule Cachex.Policy.LRWTest do
     Helper.flush()
 
     # add a new key to the cache to trigger evictions
-    { :ok, true } = Cachex.set(state, 101, 101)
+    { :ok, true } = Cachex.put(state, 101, 101)
 
     # verify the cache shrinks to 25%
     Helper.poll(250, 25, fn ->
@@ -103,22 +102,22 @@ defmodule Cachex.Policy.LRWTest do
   # the cache size back under the maximum size.
   test "evicting by removing expired keys" do
     # define our cache limit
-    limit = %Cachex.Limit{
-      limit: 100,
+    limit = limit(
+      size: 100,
       policy: Cachex.Policy.LRW,
       reclaim: 0.3
-    }
+    )
 
     # create a cache with a max size
     cache = Helper.create_cache([ limit: limit ])
 
     # retrieve the cache state
-    state = Cachex.State.get(cache)
+    state = Services.Overseer.retrieve(cache)
 
     # set 50 keys without ttl
     for x <- 1..50 do
       # set the key
-      { :ok, true } = Cachex.set(state, x, x)
+      { :ok, true } = Cachex.put(state, x, x)
 
       # tick to make sure each has a new touch time
       :timer.sleep(1)
@@ -127,7 +126,7 @@ defmodule Cachex.Policy.LRWTest do
     # set a more recent 50 keys
     for x <- 51..100 do
       # set the key
-      { :ok, true } = Cachex.set(state, x, x, ttl: 1)
+      { :ok, true } = Cachex.put(state, x, x, ttl: 1)
 
       # tick to make sure each has a new touch time
       :timer.sleep(1)
@@ -140,7 +139,7 @@ defmodule Cachex.Policy.LRWTest do
     assert(size1 == 100)
 
     # add a new key to the cache to trigger evictions
-    { :ok, true } = Cachex.set(state, 101, 101)
+    { :ok, true } = Cachex.put(state, 101, 101)
 
     # verify the cache shrinks to 51%
     Helper.poll(250, 51, fn ->
@@ -168,5 +167,4 @@ defmodule Cachex.Policy.LRWTest do
     # verify the last key added is retained
     validate.(101..101, true)
   end
-
 end

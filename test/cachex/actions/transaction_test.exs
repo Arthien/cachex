@@ -10,7 +10,7 @@ defmodule Cachex.Actions.TransactionTest do
   # the value for the first time.
   test "executing a transaction is atomic" do
     # create a test cache
-    cache = Helper.create_cache([ transactions: true ])
+    cache = Helper.create_cache([ transactional: true ])
 
     # spawn a transaction to increment a key
     spawn(fn ->
@@ -46,7 +46,7 @@ defmodule Cachex.Actions.TransactionTest do
 
     # ensure a new transaction executes normally
     result2 = Cachex.transaction(cache, [ ], fn(_state) ->
-      Cachex.LockManager.transaction?()
+      Cachex.Services.Locksmith.transaction?()
     end)
 
     # verify the results are correct
@@ -62,19 +62,47 @@ defmodule Cachex.Actions.TransactionTest do
     cache = Helper.create_cache()
 
     # retrieve the cache state
-    state1 = Cachex.State.get(cache)
+    state1 = Services.Overseer.retrieve(cache)
 
     # verify transactions are disabled
-    assert(state1.transactions == false)
+    assert(cache(state1, :transactional) == false)
 
     # execute a transactions
-    Cachex.transaction(state1.cache, [], &(&1))
+    Cachex.transaction(cache, [], &(&1))
 
     # pull the state back from the cache again
-    state2 = Cachex.State.get(cache)
+    state2 = Services.Overseer.retrieve(cache)
 
     # verify transactions are now enabled
-    assert(state2.transactions == true)
+    assert(cache(state2, :transactional) == true)
   end
 
+  # This test verifies that this action is correctly distributed across
+  # a cache cluster, instead of just the local node. We're not concerned
+  # about the actual behaviour here, only the routing of the action.
+  @tag distributed: true
+  test "transcations inside a cache cluster" do
+    # create a new cache cluster for cleaning
+    { cache, _nodes } = Helper.create_cache_cluster(2)
+
+    # we know that 2 & 3 hash to the same slots
+    { :ok, result } = Cachex.transaction(cache, [ 2, 3 ], &:erlang.phash2/1)
+
+    # check the result phashed ok
+    assert(result > 0 && is_integer(result))
+  end
+
+  # This test verifies that all keys in a put_many/3 must hash to the
+  # same slot in a cluster, otherwise a cross_slot error will occur.
+  @tag distributed: true
+  test "multiple slots will return a :cross_slot error" do
+    # create a new cache cluster for cleaning
+    { cache, _nodes } = Helper.create_cache_cluster(2)
+
+    # we know that 1 & 3 don't hash to the same slots
+    transaction = Cachex.transaction(cache, [ 1, 2 ], &:erlang.phash2/1)
+
+    # so there should be an error
+    assert(transaction == { :error, :cross_slot })
+  end
 end

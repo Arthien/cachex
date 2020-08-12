@@ -1,53 +1,46 @@
 defmodule Cachex.Actions.GetAndUpdate do
   @moduledoc false
-  # This module provides an implementation for the GetAndUpdate action, which
-  # is actually just sugar for get/set inside a Transaction. We therefore ensure
-  # that everything runs inside a Transaction to guarantee that the key is locked.
+  # Command module to enable transactional get/update semantics.
+  #
+  # This command is simply sugar, but is common enough that it deserved an explicit
+  # implementation inside the API. It does take care of the transactional context
+  # of the get/update semantics though, so it's potentially non-obvious.
+  alias Cachex.Services.Locksmith
 
-  # we need our imports
-  use Cachex.Actions
+  # add needed imports
+  import Cachex.Actions
+  import Cachex.Spec
 
-  # add some action aliases
-  alias Cachex.Actions.Get
-
-  # add other aliases
-  alias Cachex.LockManager
-  alias Cachex.State
-  alias Cachex.Util
+  ##############
+  # Public API #
+  ##############
 
   @doc """
-  Retrieves a value and updates it inside the cache.
+  Retrieves an entry and updates it inside the cache.
 
   This is basically all sugar for `transaction -> set(fun(get()))` but it provides
   an easy-to-use way to update a value directly in the cache. Naturally this
-  means that the key needs to be locked and so we use a Transaction to guarantee
-  this.
+  means that the key needs to be locked and so we use a transaction to provide
+  this guarantee.
 
   If the key is not returned by the call to `:get`, then we have to set the new
   value in the cache directly. If it does exist, then we use the update actions
   to update the existing record.
   """
-  defaction get_and_update(%State{ } = state, key, update_fun, options) do
-    LockManager.transaction(state, [ key ], fn ->
-      { status, value } = Get.execute(state, key, @notify_false)
+  def execute(cache() = cache, key, update_fun, _options) do
+    Locksmith.transaction(cache, [ key ], fn ->
+      { _label, value } = Cachex.get(cache, key, [])
 
-      value
-      |> update_fun.()
-      |> Util.normalize_commit
-      |> handle_commit(state, key, status)
+      normalized =
+        value
+        |> update_fun.()
+        |> normalize_commit
+
+      with { :commit, new_value } <- normalized do
+        apply(Cachex, write_op(value), [cache, key, new_value, []])
+      end
+
+      normalized
     end)
-  end
-
-  # Handles a commit Tuple, writing the value to the table only if the Tuple is
-  # tagged with `:commit` rather than `:ignore`. The same value is returned either
-  # way, just that one does not write to the cache.
-  defp handle_commit({ :ignore, tempv }, _state, _key, status),
-    do: { status, tempv }
-  defp handle_commit({ :commit, tempv }, state, key, status) do
-    Util
-      .write_mod(status)
-      .execute(state, key, tempv, @notify_false)
-
-    { status, tempv }
   end
 end

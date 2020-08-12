@@ -1,58 +1,51 @@
 defmodule Cachex.Actions.Touch do
   @moduledoc false
-  # This module contains the implementation of the Touch action. Touching a key
-  # is resetting the write time on a key to the current time, without affecting
-  # the TTL set against the record. It is incredibly useful for implementing
-  # least-recently used cache systems.
+  # Command module to update the touch time of cache entries.
+  #
+  # Touching an entry is the act of resetting the touch time to the current
+  # time, without affecting the expiration set against the record. As such
+  # it's incredibly useful for implementing least-recently used caching
+  # systems without breaking expiration based constracts.
+  alias Cachex.Actions
+  alias Cachex.Services.Locksmith
+  alias Actions.Ttl
 
   # we need our imports
-  use Cachex.Actions
+  import Cachex.Spec
 
-  # add some aliases
-  alias Cachex.Actions
-  alias Cachex.Actions.Ttl
-  alias Cachex.LockManager
-  alias Cachex.State
-  alias Cachex.Util
+  ##############
+  # Public API #
+  ##############
 
   @doc """
-  Touches a key inside the cache.
+  Updates the touch time of an entry inside a cache.
 
-  Touching a key will update the write time of the key, but without modifying the
-  TTL. This is done by reading back the current TTL, and then updating the record
-  appropriately to modify the touch time and setting the TTL to being the time
-  remaining.
-
-  We execute inside a Transaction to ensure that nothing modifies the key we're
-  working with between the reading of the TTL and the update call. At a glance it
-  may seem that we get away with this, but a set with a different TTL between
-  when we read the TTL and when we update would cause a race condition.
-
-  There are currently no recognised options, the argument only exists for future
-  proofing.
+  Touching an entry will update the write time of the entry, but without modifying any
+  expirations set on the entry. This is done by reading back the current expiration,
+  and then updating the record appropriately to modify the touch time and setting the
+  expiration to the offset of the two.
   """
-  defaction touch(%State{ } = state, key, options) do
-    LockManager.transaction(state, [ key ], fn ->
-      state
-      |> Ttl.execute(key, @notify_false)
-      |> handle_ttl(state, key)
+  def execute(cache() = cache, key, _options) do
+    Locksmith.transaction(cache, [ key ], fn ->
+      cache
+      |> Ttl.execute(key, [])
+      |> handle_ttl(cache, key)
     end)
   end
 
-  # Handles the result of the TTL call. If the TTL is unset, we simply update the
-  # touch time inside the record as we don't need to care about the TTL. If the
-  # TTL is set, we need to udpate the touch time to the current time, and then
-  # also update the TTL to the time remaining (so there is no change in TTL when
-  # the touch time changes). If the TTL returns missing we just return a false
-  # to the use to signify that the key was not touched because it was missing.
-  defp handle_ttl({ :ok, nil }, state, key) do
-    Actions.update(state, key, [{ 2, Util.now() }])
-  end
-  defp handle_ttl({ :ok, val }, state, key) do
-    Actions.update(state, key, [{ 2, Util.now() }, { 3, val }])
-  end
-  defp handle_ttl({ :missing, nil }, _state, _key) do
-    { :missing, false }
-  end
+  ###############
+  # Private API #
+  ###############
 
+  # Handles the result of the TTL call.
+  #
+  # If the expiration if unset, we update just the touch time insude the entry
+  # as we don't have to account for the offset. If an expiration is set, we
+  # also update the expiration on the record to be the returned offset.
+  defp handle_ttl({ :ok, value }, cache, key) do
+    Actions.update(cache, key, case value do
+      nil -> entry_mod_now()
+      ttl -> entry_mod_now(ttl: ttl)
+    end)
+  end
 end

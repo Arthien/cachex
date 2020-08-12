@@ -6,14 +6,14 @@ defmodule Cachex.Actions.ExistsTest do
   # evict it on demand using the generic read action.
   test "checking if a key exists" do
     # create a forwarding hook
-    hook = ForwardHook.create(%{ results: true })
+    hook = ForwardHook.create()
 
     # create a test cache
     cache = Helper.create_cache([ hooks: [ hook ] ])
 
     # add some keys to the cache
-    { :ok, true } = Cachex.set(cache, 1, 1)
-    { :ok, true } = Cachex.set(cache, 2, 2, ttl: 1)
+    { :ok, true } = Cachex.put(cache, 1, 1)
+    { :ok, true } = Cachex.put(cache, 2, 2, ttl: 1)
 
     # let TTLs clear
     :timer.sleep(2)
@@ -48,8 +48,28 @@ defmodule Cachex.Actions.ExistsTest do
 
     # verify the second was removed
     assert(value1 == { :ok, 1 })
-    assert(value2 == { :missing, nil })
-    assert(value3 == { :missing, nil })
+    assert(value2 == { :ok, nil })
+    assert(value3 == { :ok, nil })
   end
 
+  # This test verifies that this action is correctly distributed across
+  # a cache cluster, instead of just the local node. We're not concerned
+  # about the actual behaviour here, only the routing of the action.
+  @tag distributed: true
+  test "checking if a key exists in a cluster" do
+    # create a new cache cluster for cleaning
+    { cache, _nodes } = Helper.create_cache_cluster(2)
+
+    # we know that 1 & 2 hash to different nodes
+    { :ok, true } = Cachex.put(cache, 1, 1)
+    { :ok, true } = Cachex.put(cache, 2, 2)
+
+    # check the results of the calls across nodes
+    exists1 = Cachex.exists?(cache, 1)
+    exists2 = Cachex.exists?(cache, 2)
+
+    # both exist in the cluster
+    assert(exists1 == { :ok, true })
+    assert(exists2 == { :ok, true })
+  end
 end

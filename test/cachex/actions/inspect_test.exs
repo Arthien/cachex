@@ -10,7 +10,7 @@ defmodule Cachex.Actions.InspectTest do
 
     # set several values in the cache
     for x <- 1..3 do
-      { :ok, true } = Cachex.set(cache, "key#{x}", "value#{x}", ttl: 1)
+      { :ok, true } = Cachex.put(cache, "key#{x}", "value#{x}", ttl: 1)
     end
 
     # make sure they expire
@@ -45,8 +45,8 @@ defmodule Cachex.Actions.InspectTest do
   # error is returned if there is no Janitor process started for the cache.
   test "inspecting janitor metadata" do
     # create a cache with no janitor and one with
-    cache1 = Helper.create_cache([ ttl_interval: -1 ])
-    cache2 = Helper.create_cache([ ttl_interval:  1 ])
+    cache1 = Helper.create_cache([ expiration: expiration(interval: nil) ])
+    cache2 = Helper.create_cache([ expiration: expiration(interval:   1) ])
 
     # let the janitor run
     :timer.sleep(2)
@@ -103,17 +103,17 @@ defmodule Cachex.Actions.InspectTest do
     cache = Helper.create_cache()
 
     # get the current time
-    ctime = Cachex.Util.now()
+    ctime = now()
 
     # set a cache record
-    { :ok, true } = Cachex.set(cache, 1, "one", ttl: 1000)
+    { :ok, true } = Cachex.put(cache, 1, "one", ttl: 1000)
 
     # fetch some records
-    record1 = Cachex.inspect(cache, { :record, 1 })
-    record2 = Cachex.inspect(cache, { :record, 2 })
+    record1 = Cachex.inspect(cache, { :entry, 1 })
+    record2 = Cachex.inspect(cache, { :entry, 2 })
 
     # break down the first record
-    { :ok, { key, touched, ttl, value } } = record1
+    { :ok, { :entry, key, touched, ttl, value } } = record1
 
     # verify the first record
     assert(key == 1)
@@ -133,15 +133,15 @@ defmodule Cachex.Actions.InspectTest do
     cache = Helper.create_cache()
 
     # retrieve the cache state
-    state1 = Cachex.State.get(cache)
+    state1 = Services.Overseer.retrieve(cache)
 
     # update the state to have a different setting
-    state2 = Cachex.State.update(cache, fn(state) ->
-      %Cachex.State{ state | transactions: true }
+    state2 = Services.Overseer.update(cache, fn(state) ->
+      cache(state, transactional: true)
     end)
 
     # retrieve the state via inspection
-    result = Cachex.inspect(state1, :state)
+    result = Cachex.inspect(state1, :cache)
 
     # ensure the states don't match
     assert(result != { :ok, state1 })
@@ -163,4 +163,26 @@ defmodule Cachex.Actions.InspectTest do
     assert(result == { :error, :invalid_option })
   end
 
+  # This test verifies that the inspector always runs locally. We
+  # just write a key to both nodes in a cluster, and only one inspect
+  # call should find it - due to being only routed to the local node.
+  @tag distributed: true
+  test "inspections always run on the local node" do
+    # create a new cache cluster for cleaning
+    { cache, _nodes } = Helper.create_cache_cluster(2)
+
+    # we know that 1 & 2 hash to different nodes
+    { :ok, true } = Cachex.put(cache, 1, 1)
+    { :ok, true } = Cachex.put(cache, 2, 2)
+
+    # lookup both entries on the local node
+    { :ok, entry1 } = Cachex.inspect(cache, { :entry, 1 })
+    { :ok, entry2 } = Cachex.inspect(cache, { :entry, 2 })
+
+    # only one of them should be correctly found
+    assert(
+      (entry1 == nil && entry2 != nil) ||
+      (entry2 == nil && entry1 != nil)
+    )
+  end
 end

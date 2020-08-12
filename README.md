@@ -6,12 +6,15 @@ Cachex is an extremely fast in-memory key/value store with support for many usef
 - Time-based key expirations
 - Maximum size protection
 - Pre/post execution hooks
-- Statistics gathering
-- Multi-layered caching/key fallbacks
+- Proactive/reactive cache warming
 - Transactions and row locking
 - Asynchronous write operations
+- Distribution across app nodes
 - Syncing to a local filesystem
+- Idomatic cache streaming
+- Batched write operations
 - User command invocation
+- Statistics gathering
 
 All of these features are optional and are off by default so you can pick and choose those you wish to enable.
 
@@ -21,26 +24,41 @@ All of these features are optional and are off by default so you can pick and ch
 - [Getting Started](docs/getting-started.md)
     - [Starting Your Cache](docs/getting-started.md#starting-your-cache)
     - [Main Interface](docs/getting-started.md#main-interface)
-- [Action Blocks](docs/action-blocks.md)
-    - [Execution Blocks](docs/action-blocks.md#execution-blocks)
-    - [Transaction Blocks](docs/action-blocks.md#transaction-blocks)
-- [Cache Limits](docs/cache-limits.md)
-    - [Configuration](docs/cache-limits.md#policies)
-    - [Policies](docs/cache-limits.md#policies)
-- [Custom Commands](docs/custom-commands.md)
-    - [Defining Commands](docs/custom-commands.md#defining-commands)
-    - [Invoking A Command](docs/custom-commands.md#invoking-a-command)
-- [Disk Interaction](docs/disk-interaction.md)
-- [Execution Hooks](docs/execution-hooks.md)
-    - [Creating Hooks](docs/execution-hooks.md#creating-hooks)
-    - [Provisions](docs/execution-hooks.md#provisions)
-- [Fallback Caching](docs/fallback-caching.md)
-    - [Common Use Cases](docs/fallback-caching.md#common-use-cases)
-    - [Expirations](docs/fallback-caching.md#expirations)
-    - [Handling Errors](docs/fallback-caching.md#handling-errors)
-- [TTL Implementation](docs/ttl-implementation.md)
-    - [Janitor Processes](docs/ttl-implementation.md#janitor-processes)
-    - [On Demand Expiration](docs/ttl-implementation.md#on-demand-expiration)
+- [Action Blocks](docs/features/action-blocks.md)
+    - [Execution Blocks](docs/features/action-blocks.md#execution-blocks)
+    - [Transaction Blocks](docs/features/action-blocks.md#transaction-blocks)
+- [Cache Limits](docs/features/cache-limits.md)
+    - [Configuration](docs/features/cache-limits.md#configuration)
+    - [Policies](docs/features/cache-limits.md#policies)
+- [Cache Warming](docs/features/cache-warming)
+    - [Reactive Warming](docs/features/cache-warming/reactive-warming.md)
+        - [Overview](docs/features/cache-warming/reactive-warming.md#overview)
+        - [Courier](docs/features/cache-warming/reactive-warming.md#courier)
+        - [Expirations](docs/features/cache-warming/reactive-warming.md#expirations)
+        - [Use Cases](docs/features/cache-warming/reactive-warming.md#use-cases)
+    - [Proactive Warming](docs/features/cache-warming/proactive-warming.md)
+        - [Overview](docs/features/cache-warming/proactive-warming.md#overview)
+        - [Definition](docs/features/cache-warming/proactive-warming.md#definition)
+        - [Use Cases](docs/features/cache-warming/proactive-warming.md#use-cases)
+- [Custom Commands](docs/features/custom-commands.md)
+    - [Defining Commands](docs/features/custom-commands.md#defining-commands)
+    - [Invoking A Command](docs/features/custom-commands.md#invoking-a-command)
+- [Disk Interaction](docs/features/disk-interaction.md)
+- [Distributed Caches](docs/features/distributed-caches.md)
+    - [Overview](docs/features/distributed-caches.md#overview)
+    - [Local Actions](docs/features/distributed-caches.md#local-actions)
+    - [Disabled Actions](docs/features/distributed-caches.md#disabled-actions)
+- [Execution Hooks](docs/features/execution-hooks.md)
+    - [Creating Hooks](docs/features/execution-hooks.md#creating-hooks)
+    - [Provisions](docs/features/execution-hooks.md#provisions)
+- [Streaming Caches](docs/features/streaming-caches.md)
+    - [Complex Streaming](docs/features/streaming-caches.md#complex-streaming)
+- [TTL Implementation](docs/features/ttl-implementation.md)
+    - [Janitor Processes](docs/features/ttl-implementation.md#janitor-processes)
+    - [Lazy Expiration](docs/features/ttl-implementation.md#lazy-expiration)
+- [Migrations](docs/migrations)
+    - [Migrating To v3.x](docs/migrations/migrating-to-v3.md)
+    - [Migrating To v2.x](docs/migrations/migrating-to-v2.md)
 - [Benchmarks](#benchmarks)
 - [Contributions](#contributions)
 
@@ -52,7 +70,7 @@ As of v0.8.0, Cachex is available on [Hex](https://hex.pm/). You can install the
 
 ```elixir
 def deps do
-  [{:cachex, "~> 2.1"}]
+  [{:cachex, "~> 3.2"}]
 end
 ```
 
@@ -71,8 +89,19 @@ The typical use of Cachex is to set up using a Supervisor, so that it can be han
 ```elixir
 Supervisor.start_link(
   [
-    worker(Cachex, [:my_cache, []])
+    %{
+      id: :my_cache_id,
+      start: {Cachex, :start_link, [:my_cache, []]}
+    }
   ]
+)
+```
+
+If you are using Elixir versions prior to Elixir v1.5, you are able to use the older syntax:
+
+```elixir
+Supervisor.start_link(
+  [ worker(Cachex, [:my_cache, []]) ]
 )
 ```
 
@@ -86,21 +115,23 @@ For anything else, please see the [documentation](https://github.com/whitfin/cac
 
 ## Benchmarks
 
-There are some very trivial benchmarks available using [Benchfella](https://github.com/alco/benchfella) in the `bench/` directory. You can run the benchmarks using the following command:
+There are some very trivial benchmarks available using [Benchee](https://github.com/PragTob/benchee) in the `benchmarks/` directory. You can run the benchmarks using the following command:
 
 ```bash
 # default benchmarks, no modifiers
 $ mix bench
+
+# enable underlying table compression
+$ CACHEX_BENCH_COMPRESS=true mix bench
 
 # use a state instead of a cache name
 $ CACHEX_BENCH_STATE=true mix bench
 
 # use a lock write context for all writes
 $ CACHEX_BENCH_TRANSACTIONS=true mix bench
-
-# use both a state and lock write context
-$ CACHEX_BENCH_STATE=true CACHEX_BENCH_TRANSACTIONS=true mix bench
 ```
+
+Any combination of these environment variables is also possible, to allow you to test and benchmark your specific workflows.
 
 ## Contributions
 
@@ -109,7 +140,7 @@ If you feel something can be improved, or have any questions about certain behav
 If you *do* make changes to the codebase, please make sure you test your changes thoroughly, and include any unit tests alongside new or changed behaviours. Cachex currently uses the excellent [excoveralls](https://github.com/parroty/excoveralls) to track code coverage.
 
 ```bash
-$ mix test
+$ mix test # --exclude=distributed to skip slower tests
 $ mix credo
 $ mix coveralls
 $ mix coveralls.html && open cover/excoveralls.html

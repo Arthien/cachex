@@ -2,30 +2,26 @@
 
 ## Starting Your Cache
 
-To start a cache you can use either `start/3` or `start_link/3`, and in general you should place it into your Supervision trees for fault tolerance. The first argument is the name of the cache and defines how you will communicate with your cache.
+To start a cache you can use either `start/2` or `start_link/2`, and in general you should place it into your Supervision trees for fault tolerance. The first argument is the name of the cache and defines how you will communicate with your cache.
 
 ```elixir
 Supervisor.start_link(
-  [
-    worker(Cachex, [ :my_cache, [], [] ])
-  ]
+  [ worker(Cachex, [ :my_cache, [] ]) ]
 )
 ```
 
 The second and third arguments are both optional and represent cache and server options respectively. Cache options can be set on a cache at startup and cannot be modified. They're defined on a per-cache basis and control the features available to the cache. This table contains a summary of most of the available options, but please look at the module documentation either in GitHub or on Hexdocs for full documentation on what each one can configure.
 
-|      Options     |       Values       |                               Description                               |
-|:----------------:|:------------------:|:-----------------------------------------------------------------------:|
-|     commands     |  list of commands  |     A list of custom commands to attach to the cache for invocation     |
-|    default_ttl   |     milliseconds   | A default expiration time for a key when being placed inside the cache. |
-|     ets_opts     |   list of options  |               A list of options to give to the ETS table.               |
-|     fallback     |  Function or List  |   A function accepting a key which is used for multi-layered caching.   |
-|       hooks      |    list of Hooks   |    A list of execution hooks (see below) to listen on cache actions.    |
-|       limit      |  a Limit constuct  |     An integer or Limit struct to define the bounds of this cache.      |
-|        ode       |  `true` or `false` |  Whether or not to enable on-demand expirations when reading back keys. |
-|   record_stats   |  `true` or `false` |            Whether to track statistics for this cache or not.           |
-|   transactions   |  `true` or `false` |             Whether to turn on transactions at cache start.             |
-|   ttl_interval   |     milliseconds   |                The frequency the Janitor process runs at.               |
+|      Options     |          Values          |                             Description                            |
+|:----------------:|:------------------------:|:------------------------------------------------------------------:|
+|     commands     |      map or keyword      |       A collection of custom commands to attach to the cache.      |
+|    expiration    |      `expiration()`      |      An expiration options record imported from Cachex.Spec.       |
+|     fallback     | function or `fallback()` |            A fallback record imported from Cachex.Spec.            |
+|       hooks      |     list of `hook()`     |        A list of execution hooks to listen on cache actions.       |
+|       limit      |    a `limit()` record    |    An integer or Limit struct to define the bounds of this cache.  |
+|       stats      |          boolean         |         Whether to track statistics for this cache or not.         |
+|   transactional  |          boolean         |           Whether to turn on transactions at cache start.          |
+|      warmers     |    list of `warmer()`    |           A list of cache warmers to enable on the cache.          |
 
 ## Main Interface
 

@@ -1,85 +1,75 @@
 defmodule Cachex.Actions.Stream do
   @moduledoc false
-  # This module handles the Streaming implementation of a cache. A Stream is a
-  # lazy consumer of a cache in that it allows iteration of a cache on-demand.
-  # Note that streams do not currenty respect expirations, although this may
-  # change in future.
+  # Command module to allow streaming of cache entries.
+  #
+  # A cache `Stream` is a lazy consumer of a cache in that it allows iteration
+  # of a cache on an as-needed basis. It acts as any other `Stream` from Elixir,
+  # and is fully compatible with the functions found in the `Enum` module.
+  alias Cachex.Options
 
-  # we need our imports
-  use Cachex.Actions
-
-  # add some aliases
-  alias Cachex.State
-  alias Cachex.Util
+  # need our imports
+  import Cachex.Errors
+  import Cachex.Spec
 
   # our test record for testing matches
-  @test { "key", Util.now(), 1000, "value" }
+  @test entry([
+    key: "key",
+    touched: now(),
+    ttl: 1000,
+    value: "value"
+  ])
+
+  ##############
+  # Public API #
+  ##############
 
   @doc """
-  Creates a Stream for a cache.
+  Creates a new `Stream` for a given cache.
 
   Streams are a moving window of a cache, in that they will reflect the latest
   changes in a cache once they're consumed. For example, if you create a Stream
   and consume it 15 minutes later, you'll see all changes which occurred in those
   15 minutes.
 
-  You can provide custom structures to stream using via the `:of` option, but
-  as of yet there is no way to query before consumption - meaning that you'll
-  have to filter the Stream itself rather than avoiding buffering in the first
-  place - this may change in future.
-
   We execute an `:ets.test_ms/2` call before doing anything to ensure the user
   has provided a valid return type. If they haven't, we return an error before
-  creating a cursor or the Stream itself.
+  creating a cursor or the `Stream` itself.
   """
-  defaction stream(%State{ cache: cache } = state, options) do
-    spec =
-      options
-      |> Keyword.get(:of, { { :key, :value } })
-      |> Util.retrieve_all_rows
+  def execute(cache(name: name), spec, options) do
+    case :ets.test_ms(@test, spec) do
+      { :ok, _result } ->
+        options
+        |> Options.get(:batch_size, &is_positive_integer/1, 25)
+        |> init_stream(name, spec)
+        |> wrap(:ok)
 
-    @test
-    |> :ets.test_ms(spec)
-    |> handle_test(cache, spec)
+      { :error, _result } ->
+        error(:invalid_match)
+    end
   end
 
-  # Handles the result of testing the users match spec. If it's invalid we just
-  # return an error and halt execution. If it's a valid match, we return a new
-  # stream inside an ok Tuple after initializing it with the given spec.
-  defp handle_test({ :ok, _result }, cache, spec),
-    do: { :ok, init_stream(cache, spec) }
-  defp handle_test({ :error, _result }, _cache, _spec),
-    do: @error_invalid_match
+  ###############
+  # Private API #
+  ###############
 
-  # Initializes a Stream resource using an underlying ETS cursor as the resource.
-  # Every time more items are requested, we pull another batch of items until the
-  # cursor is finished, in which case we halt the Stream and kill the cursor.
-  defp init_stream(cache, spec) do
+  # Initializes a `Stream` resource from an underlying ETS cursor.
+  #
+  # Each time more items are requested we pull another batch of entries until
+  # the cursor is spent, in which case we halt the stream and kill the cursor.
+  defp init_stream(batch, name, spec) do
     Stream.resource(
       fn ->
-        cache
+        name
         |> :ets.table([ { :traverse, { :select, spec } }])
         |> :qlc.cursor
       end,
-      &iterate/1,
+      fn(cursor) ->
+        case :qlc.next_answers(cursor, batch) do
+          [ ] -> { :halt, cursor }
+          ans -> {   ans, cursor }
+        end
+      end,
       &:qlc.delete_cursor/1
     )
   end
-
-  # Iterates a cursor by pulling back the next batch of items from the cursor
-  # and passing them through to `handle_answers/2` to be correctly formed.
-  defp iterate(cursor) do
-    cursor
-    |> :qlc.next_answers
-    |> handle_answers(cursor)
-  end
-
-  # Handles a result set from a query cursor. If the result set it empty, we just
-  # halt the Stream, otherwise we return the next batch of answers alongside the
-  # query cursor, in order to close the cursor in the cleanup phase.
-  defp handle_answers([ ], cursor),
-    do: { :halt, cursor }
-  defp handle_answers(ans, cursor),
-    do: {   ans, cursor }
-
 end

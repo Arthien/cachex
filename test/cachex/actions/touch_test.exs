@@ -7,24 +7,24 @@ defmodule Cachex.Actions.TouchTest do
   # touch time on the record has been modified.
   test "touching a key in the cache" do
     # create a forwarding hook
-    hook = ForwardHook.create(%{ results: true })
+    hook = ForwardHook.create()
 
     # create a test cache
     cache = Helper.create_cache([ hooks: [ hook ] ])
 
     # pull back the state
-    state = Cachex.State.get(cache)
+    state = Services.Overseer.retrieve(cache)
 
     # add some keys to the cache
-    { :ok, true } = Cachex.set(cache, 1, 1)
-    { :ok, true } = Cachex.set(cache, 2, 2, ttl: 1000)
+    { :ok, true } = Cachex.put(cache, 1, 1)
+    { :ok, true } = Cachex.put(cache, 2, 2, ttl: 1000)
 
     # clear messages
     Helper.flush()
 
     # retrieve the raw records
-    { _key1, touched1, ttl1, _value1 } = Cachex.Actions.read(state, 1)
-    { _key2, touched2, ttl2, _value2 } = Cachex.Actions.read(state, 2)
+    entry(touched: touched1, ttl: ttl1) = Cachex.Actions.read(state, 1)
+    entry(touched: touched2, ttl: ttl2) = Cachex.Actions.read(state, 2)
 
     # the first TTL should be nil
     assert(ttl1 == nil)
@@ -45,7 +45,7 @@ defmodule Cachex.Actions.TouchTest do
     assert(touch2 == { :ok, true })
 
     # the third shouldn't, as it's missing
-    assert(touch3 == { :missing, false })
+    assert(touch3 == { :ok, false })
 
     # verify the hooks were updated with the message
     assert_receive({ { :touch, [ 1, [] ] }, ^touch1 })
@@ -53,8 +53,8 @@ defmodule Cachex.Actions.TouchTest do
     assert_receive({ { :touch, [ 3, [] ] }, ^touch3 })
 
     # retrieve the raw records again
-    { _key1, touched3, ttl3, _value1 } = Cachex.Actions.read(state, 1)
-    { _key2, touched4, ttl4, _value2 } = Cachex.Actions.read(state, 2)
+    entry(touched: touched3, ttl: ttl3) = Cachex.Actions.read(state, 1)
+    entry(touched: touched4, ttl: ttl4) = Cachex.Actions.read(state, 2)
 
     # the first ttl should still be nil
     assert(ttl3 == nil)
@@ -75,4 +75,47 @@ defmodule Cachex.Actions.TouchTest do
     assert_in_delta(ttl5, 940, 11)
   end
 
+  # This test verifies that this action is correctly distributed across
+  # a cache cluster, instead of just the local node. We're not concerned
+  # about the actual behaviour here, only the routing of the action.
+  @tag distributed: true
+  test "adding new entries to a cache cluster" do
+    # create a new cache cluster for cleaning
+    { cache, _nodes } = Helper.create_cache_cluster(2)
+
+    # we know that 1 & 2 hash to different nodes
+    { :ok, true } = Cachex.put(cache, 1, 1)
+    { :ok, true } = Cachex.put(cache, 2, 2)
+
+    # wait a little
+    :timer.sleep(10)
+
+    # pull back the records inserted so far
+    { :ok, export1 } = Cachex.export(cache)
+
+    # sort to guarantee we're checking well
+    [ record1, record2 ] = Enum.sort(export1)
+
+    # unpack the records touch time
+    entry(touched: touched1) = record1
+    entry(touched: touched2) = record2
+
+    # now touch both keys
+    { :ok, true } = Cachex.touch(cache, 1)
+    { :ok, true } = Cachex.touch(cache, 2)
+
+    # pull back the records after the touchs
+    { :ok, export2 } = Cachex.export(cache)
+
+    # sort to guarantee we're checking well
+    [ record3, record4 ] = Enum.sort(export2)
+
+    # unpack the records touch time
+    entry(touched: touched3) = record3
+    entry(touched: touched4) = record4
+
+    # new touched should be larger than old
+    assert(touched3 > touched1)
+    assert(touched4 > touched2)
+  end
 end
